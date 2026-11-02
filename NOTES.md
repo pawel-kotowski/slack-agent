@@ -124,6 +124,40 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   chart that knew an app's private API, was in the public code for 20 minutes.
 - One preview at a time per `ui_origin`: Funnel serves it at the root; `/s` stays the listener's.
 
+## T3 Code backend
+
+Found 2026-11-02 against T3 Code 0.1.6 (desktop app), by reading its bundled server and with a
+scratch repo and Claude Haiku threads.
+
+- **How T3 starts Claude.** Through the Claude Agent SDK, with the `claude_code` system prompt
+  preset plus T3's own text appended, and no `--setting-sources` flag, so the CLI's default
+  sources load: user (the instance's home, `CLAUDE_CONFIG_DIR`), project and local. The
+  environment is the T3 server's own plus `CLAUDE_CONFIG_DIR`: nothing per thread. An instance's
+  `launchArgs` (`--append-system-prompt-file`, `--settings`) are per instance, not per thread, so
+  they cannot carry one task's conversation.
+- **So a task's setup lives in its worktree.** `.claude/settings.local.json` there gives the agent
+  the gate hook and, through its `env` key, `SLACK_AGENT_CONV` for its Bash commands and hooks;
+  `CLAUDE.local.md` gives it the Slack rules as project instructions, which Claude Code reads
+  again after a compaction (tested: after `/compact` the agent still answered through the helper,
+  with the right conversation). `CLAUDE.local.md` showed in `git status` (`settings.local.json` is
+  in many people's global ignore, not all), and a dirty workspace is kept at cleanup, so both go
+  into the repo's `.git/info/exclude`.
+- **A worktree session also loads the main checkout's `.claude/settings.local.json`.** With a
+  hook in both, both ran. Write task files into the worktree only, never into `repo`.
+- **The instance's own user settings apply.** The owner's profile blocked a bare `sleep 25`
+  (a hook of theirs), so the agent ran it in the background and ended the turn; a test that needs
+  a long foreground turn uses `python3 -c 'import time; time.sleep(30)'`.
+- **`t3_thread_launch` answers before the worktree exists.** `worktreePath` appears in
+  `t3_thread_read` a moment later; the listener waits up to a minute for it.
+- **Messages.** `t3_thread_send` with `mode: auto` put a message sent mid-turn into the running
+  turn (the same run), and the agent acted on it after its command finished. `/compact` as a
+  message compacts (a `compaction` item). `t3_thread_interrupt` stops the running turn (the run
+  ends `interrupted`, the Bash command too). A run whose provider failed shows as status
+  `failed`; a new message starts a new turn on the same session, so the listener only relaunches
+  when the thread is gone or archived (`t3_thread_read` answers `thread_not_found`).
+- **No MCP tool removes a worktree, deletes a thread or opens a terminal.** Cleanup archives the
+  thread and runs `git worktree remove` and `git branch -D` itself; previews run outside T3.
+
 ## Driving the Slack app for tests
 
 - `set-value` on the composer fills it, but pressing Return does not send; click Send.

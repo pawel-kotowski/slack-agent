@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["slack_sdk>=3.33"]
 # ///
-"""slack-agent: a Slack bot that starts Claude Code sessions in Orca workspaces from Slack.
+"""slack-agent: a Slack bot that starts Claude Code sessions from Slack, in Orca workspaces or T3 Code threads.
 
   slack-agent listen                          run the Socket Mode listener (one per config)
 
@@ -78,6 +78,13 @@ DEFAULTS = {
     "test_ui": False,
     # Nobody watches the terminal: a question tool would wait there unseen, so questions go through `slack-agent ask`.
     "claude_args": ["--dangerously-skip-permissions", "--disallowedTools=AskUserQuestion"],
+    # Where tasks run: "orca" (a worktree and a terminal per task) or "t3" (a T3 Code thread in its own worktree).
+    "backend": "orca",
+    "t3_tool": ["t3-tool"],
+    "t3_project": None,
+    "t3_instance": None,
+    "t3_model": None,
+    "cleanup_command": None,
 }
 
 
@@ -90,7 +97,7 @@ def load_config() -> dict:
     for key in ("repo", "workspace", "state_dir", "claude_projects"):
         if config.get(key):
             config[key] = str(Path(config[key]).expanduser())
-    for key in ("agent_command", "usage_check"):
+    for key in ("agent_command", "usage_check", "t3_tool"):
         if config.get(key):
             config[key] = [os.path.expanduser(a) for a in config[key]]
     return config
@@ -152,6 +159,7 @@ APPROVAL_WAIT_S = 30 * 60
 # How often the listener compares each code channel's diff with its Code tab, and asks GitHub for its PR.
 WATCH_S = 10
 PR_CHECK_S = 120
+T3_CHECK_S = 30  # how often the listener asks T3 for failed turns
 RECONNECT_S = 90  # the Slack socket may be down this long before the listener restarts
 SEED = re.compile(r"<https?://[^|>]+\|Context> from <#")
 # The wake classifier: Haiku with Claude Code's own prompt, tools, settings and MCP servers
@@ -292,6 +300,144 @@ def orca(*args: str) -> dict:
         return {"ok": False, "error": (out.stdout + out.stderr).strip()[:500]}
 
 
+# --- the T3 Code backend ---------------------------------------------------------------------
+# T3 runs each task as a thread in its own worktree; `t3_tool` calls one of its MCP tools and prints
+# the result as JSON (on an error: exit 1, the error on stderr).
+T3 = CONFIG["backend"] == "t3"
+# The session handle: an Orca terminal, or a T3 thread.
+HANDLE = "thread" if T3 else "terminal"
+# T3 passes no per-thread environment to Claude, so a task's agent gets its hook, its env and the
+# Slack rules from files in its worktree, which Claude Code reads as local settings and memory.
+AGENT_FILES = (".claude/settings.local.json", "CLAUDE.local.md")
+
+
+def t3(tool: str, args: dict) -> dict:
+    """Call a T3 MCP tool. A failure comes back as {"error": <message>}."""
+    try:
+        out = subprocess.run([*CONFIG["t3_tool"], tool, json.dumps(args)], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"error": repr(exc)}
+    text = out.stdout if out.returncode == 0 else out.stderr
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+    if out.returncode:
+        message = data.get("message") or data.get("code") if isinstance(data, dict) else None
+        return {"error": message or (out.stderr + out.stdout).strip()[:500]}
+    return data if isinstance(data, dict) else {"result": data}
+
+
+_t3_project: list[str] = []
+
+
+def t3_project() -> str | None:
+    """The configured T3 project, or the one whose folder is the repo."""
+    if CONFIG["t3_project"]:
+        return CONFIG["t3_project"]
+    if not _t3_project:
+        repo, cursor = os.path.realpath(CONFIG["repo"]), 0
+        while cursor is not None:
+            page = t3("t3_project_list", {"limit": 100, "cursor": cursor})
+            for p in page.get("projects", []):
+                if not p.get("deletedAt") and os.path.realpath(p.get("workspaceRoot") or "") == repo:
+                    _t3_project.append(p["id"])
+            cursor = page.get("nextCursor") if not _t3_project else None
+    return _t3_project[0] if _t3_project else None
+
+
+def t3_launch(title: str, strategy: dict) -> dict:
+    """An idle T3 thread: its id, worktree and branch, or an error."""
+    project = t3_project()
+    if not project:
+        return {"error": f"no T3 project has the folder {CONFIG['repo']}; add it with `t3 project add`"}
+    res = t3("t3_thread_launch", {
+        "projectId": project, "title": title[:80], "workspaceStrategy": strategy, "runtimeMode": "full-access",
+        "modelSelection": {"instanceId": CONFIG["t3_instance"], "model": CONFIG["t3_model"]}})
+    if not res.get("threadId"):
+        return {"error": res.get("error") or f"no thread: {res}"}
+    # T3 makes the worktree after it answers: wait for its path.
+    for _ in range(60):
+        thread = t3("t3_thread_read", {"threadId": res["threadId"], "limit": 1}).get("thread") or {}
+        if thread.get("worktreePath") and Path(thread["worktreePath"]).is_dir():
+            break
+        time.sleep(1)
+    else:
+        t3("t3_thread_organize", {"threadId": res["threadId"], "action": "archive"})
+        return {"error": f"T3 made no worktree for thread {res['threadId']} in a minute"}
+    return {"thread": res["threadId"], "path": thread["worktreePath"], "branch": thread.get("branch") or ""}
+
+
+def t3_thread(thread: str) -> dict | None:
+    """The thread as T3 shows it, or None when it is gone or archived."""
+    found = t3("t3_thread_read", {"threadId": thread, "limit": 1}).get("thread")
+    return None if not found or found.get("archived") else found
+
+
+def t3_send(thread: str, text: str, mode: str = "auto") -> bool:
+    """`auto` starts an idle thread, steers a running turn or queues; `queue` waits for the turn to end."""
+    res = t3("t3_thread_send", {"threadId": thread, "mode": mode, "message": text})
+    if res.get("error"):
+        log("t3 send failed", thread, res["error"])
+    return not res.get("error")
+
+
+def write_agent_files(ws: str, conv: str, system: str) -> None:
+    """The gate hook, SLACK_AGENT_CONV and the Slack rules for the agent in a T3 worktree. Claude Code
+    reads `.claude/settings.local.json` (hooks, env, permissions) and `CLAUDE.local.md` (instructions
+    it keeps after compaction) from the session's folder."""
+    gate_cmd = f"SLACK_AGENT_CONV={shlex.quote(conv)} {ENV} {shlex.quote(str(SELF))} gate"
+    settings = {"env": {"SLACK_AGENT_CONV": conv, "SLACK_AGENT_CONFIG": str(CONFIG_PATH)},
+                # Nobody watches the thread: a question tool would wait there unseen.
+                "permissions": {"deny": ["AskUserQuestion"]},
+                "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": gate_cmd, "timeout": APPROVAL_WAIT_S + 60}]}]}}
+    write_json(Path(ws) / AGENT_FILES[0], settings)
+    (Path(ws) / AGENT_FILES[1]).write_text(system)
+    # Kept out of `git status`, so a finished task's workspace counts as clean and is removed.
+    common = subprocess.run(["git", "-C", ws, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            capture_output=True, text=True).stdout.strip()
+    if common:
+        exclude = Path(common) / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        lines = exclude.read_text().splitlines() if exclude.exists() else []
+        missing = [f"/{f}" for f in AGENT_FILES if f"/{f}" not in lines]
+        if missing:
+            with exclude.open("a") as f:
+                f.write("".join(f"{line}\n" for line in ["# slack-agent's files for a task's agent", *missing]))
+
+
+def start_detached(name: str, cwd: str, command: str) -> dict:
+    """Run a shell command outside the listener, to stop with stop_detached: a transient systemd
+    user unit on Linux, a process in a session of its own elsewhere. Output goes to <name>.log."""
+    out = STATE_DIR / f"{name}.log"
+    if sys.platform.startswith("linux") and shutil.which("systemd-run"):
+        unit = f"slack-agent-{name}"
+        subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True)
+        res = subprocess.run(["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}",
+                              f"--working-directory={cwd}", f"--setenv=PATH={os.environ.get('PATH', '')}",
+                              f"--property=StandardOutput=append:{out}", f"--property=StandardError=append:{out}",
+                              "bash", "-lc", command], capture_output=True, text=True)
+        if res.returncode == 0:
+            return {"unit": unit}
+        log("systemd-run failed", unit, res.stderr.strip()[:300])
+    with out.open("a") as f:
+        proc = subprocess.Popen(["bash", "-lc", command], cwd=cwd, stdin=subprocess.DEVNULL, stdout=f,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    threading.Thread(target=proc.wait, daemon=True).start()  # reaped when it ends, if this process lives on
+    return {"pid": proc.pid}
+
+
+def stop_detached(proc: dict) -> None:
+    if proc.get("unit"):
+        subprocess.run(["systemctl", "--user", "stop", proc["unit"]], capture_output=True)
+    elif proc.get("pid"):
+        try:
+            os.killpg(proc["pid"], signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def slug(text: str) -> str:
     plain = unicodedata.normalize("NFKD", re.sub(r"<[^>]*>", " ", text).replace("ł", "l").replace("Ł", "L")).encode("ascii", "ignore").decode()
     words = re.findall(r"[a-z0-9]+", plain.lower())[:5]
@@ -302,7 +448,7 @@ def setup_code_channel(web: WebClient, channel: str, workspace: str, branch: str
     """The context bar and slash commands every code channel starts with."""
     set_bar(web, channel, [
         {"key": "repo", "label": CONFIG["repo_label"].split("/")[-1], "icon": "folder", "url": CONFIG["repo_url"]},
-        # The branch ends in the Orca workspace's name, so one item names both.
+        # The branch ends in the workspace's name, so one item names both.
         {"key": "branch", "label": Path(workspace).name, "icon": "branch"},
         {"key": "wakers", "label": ", ".join(CONFIG["wakers"].values()), "icon": "hierarchy"},
         {"key": "finish", "label": "Finish", "icon": "lock", "item_type": "action"},
@@ -469,8 +615,11 @@ def preview_start(web: WebClient, channel: str) -> dict:
     marker = cfg.get("setup_marker", ".slack-agent-setup-done")
     setup = "" if not cfg.get("setup") or (ws / marker).exists() else f"{cfg['setup']} && touch {marker} && "
     cmd = f"{load}; {setup}{cfg['command'].format(**values)}"
-    res = orca("terminal", "create", "--worktree", f"path:{ws}", "--title", "preview (signed in)", "--command", cmd)
-    terms = [(res.get("result") or {}).get("terminal", {}).get("handle")]
+    if T3:
+        process, terms = start_detached(f"{channel}-preview", str(ws), cmd), []
+    else:
+        res = orca("terminal", "create", "--worktree", f"path:{ws}", "--title", "preview (signed in)", "--command", cmd)
+        process, terms = None, [(res.get("result") or {}).get("terminal", {}).get("handle")]
     port = CONFIG["ui_origin"].rsplit(":", 1)[1]
     subprocess.run(["tailscale", "funnel", "--bg", f"--https={port}", "--set-path", "/", f"http://127.0.0.1:{ui}"],
                    capture_output=True)
@@ -479,7 +628,7 @@ def preview_start(web: WebClient, channel: str) -> dict:
     except SlackApiError:
         private = False
     preview = {"url": CONFIG["ui_origin"] + "/", "user": cfg["user"], "password": password, "db": db,
-               "api": api, "ui": ui, "terminals": terms, "private": private}
+               "api": api, "ui": ui, "terminals": terms, "process": process, "private": private}
     update_state(channel, preview=preview)
     # In a public channel anyone in the workspace can read the login, so it is sent privately there.
     login = "password below" if private else "password: `/preview-login`"
@@ -499,6 +648,8 @@ def preview_stop(channel: str) -> None:
     for handle in preview.get("terminals", []):
         if handle:
             orca("terminal", "close", "--terminal", handle)
+    if preview.get("process"):
+        stop_detached(preview["process"])
     # An app's start script may put its servers in sessions of their own, which a closed terminal does not reach.
     for p in (preview["api"], preview["ui"]):
         pids = subprocess.run(["lsof", "-t", f"-iTCP:{p}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
@@ -563,9 +714,9 @@ takes a conversation first; `slack-agent --help` lists them all.
 How to work:
 - Write every Slack message in the language of the task message, and answer each later message
   in its own language.
-- Slack does not see this terminal, and nobody reads it. Reply only through the helper, markdown on
-  stdin (the Slack connector posts as {owner}, so never use it to post). After the helper call, end the
-  turn with the one word "sent": do not repeat or sum up in the terminal what you posted.
+- Slack does not see your own text output, and nobody reads it. Reply only through the helper, markdown
+  on stdin (the Slack connector posts as {owner}, so never use it to post). After the helper call, end
+  the turn with the one word "sent": do not repeat or sum up in your output what you posted.
   slack-agent say <conv> <<'EOF'
   ...
   EOF
@@ -581,7 +732,7 @@ How to work:
   question with `slack-agent ask <conv>` instead of `say` (it sets the status to suspended). When the
   answer is one of a few choices, give them as buttons: `slack-agent ask <conv> "Option A" "Option B"`;
   a click comes back as `[slack] <name> chose "Option A" in answer to your question "..."`, and people
-  can still type. Never ask in the terminal: nobody watches it, and an answer only comes from Slack.
+  can still type. Never ask in your own output: nobody watches it, and an answer only comes from Slack.
 - New Slack messages arrive here as lines that start with "[slack] <name>:"; that message is for
   you. When others talked before it, the line ends with "[context only, said before it and not to
   you: ...]": read it, do not act on it. A line that starts "[slack] <name> (maybe not to you):" is
@@ -602,7 +753,7 @@ How to work:
 - Finish with `slack-agent finish <conv>` and a short summary on stdin, when {owner} says the task is
   done or a session thread's answer is complete and nothing is left. In a code channel it archives
   the channel; the workspace is removed when its branch has nothing unpushed.
-- This task has its own Orca workspace, {workspace}, on branch {branch}. Commit there.
+- This task has its own workspace (a git worktree), {workspace}, on branch {branch}. Commit there.
   Its setup did not run.{notes}
 - In a code channel, show the work:
   - the Code tab follows your workspace by itself (diff against origin/main) and on /diff; for
@@ -861,8 +1012,11 @@ class Listener:
             if reply:
                 respond(reply_url, {"response_type": "ephemeral", "replace_original": False, "text": reply})
         elif action_id == "ui_compact":
-            handle = self.sessions[conv].get("terminal")
-            if handle and orca("terminal", "send", "--terminal", handle, "--text", "/compact").get("ok"):
+            handle = self.sessions[conv].get(HANDLE)
+            if T3:
+                if handle:
+                    t3_send(handle, "/compact", mode="queue")  # after the running turn, as typed into a busy terminal
+            elif handle and orca("terminal", "send", "--terminal", handle, "--text", "/compact").get("ok"):
                 orca("terminal", "send", "--terminal", handle, "--enter")
         else:
             what = {"ui_tests": "pressed Run tests: run the tests your change touches",
@@ -903,14 +1057,24 @@ class Listener:
                                workspace=workspace, branch=branch)
         task = TASK.format(who=self.display(user), text=text, origin_link=link, origin=origin, ts=ts)
         self.sessions[conv]["seen"] = ts
-        self.sessions[conv]["terminal"] = self.launch(conv, system, task)
+        self.sessions[conv][HANDLE] = self.launch(conv, system, task)
         del self.sessions[conv]["starting"]
         self.save()
-        log("started", conv, name, self.sessions[conv]["terminal"])
+        log("started", conv, name, self.sessions[conv][HANDLE])
 
     def workspace(self, conv: str, name: str) -> tuple[str | None, str | None]:
         # A task starts from the newest origin/main, not from the checkout's local main.
         subprocess.run(["git", "-C", str(CONFIG["repo"]), "fetch", "-q", "origin", "main"], capture_output=True)
+        if T3:
+            # An idle thread in a new worktree; launch() gives it the agent's files, then the task.
+            res = t3_launch(f"slack {name}", {"type": "worktree", "branch": name, "baseRef": "main",
+                                              "startFromOrigin": True})
+            if res.get("error"):
+                log("workspace failed", conv, res)
+                post(self.web, conv, f"Could not make a workspace: {res['error']}")
+                return None, None
+            self.sessions[conv]["new_thread"] = res["thread"]
+            return res["path"], res["branch"]
         res = orca("worktree", "create", "--repo", f'path:{CONFIG["repo"]}', "--name", name,
                    "--parent-worktree", f'path:{CONFIG["workspace"]}', "--setup", "skip", "--base-branch", "origin/main",
                    "--comment", f"Slack task {name} ({conv}), started by slack-agent")
@@ -923,6 +1087,8 @@ class Listener:
 
     def launch(self, conv: str, system: str, task: str) -> str | None:
         s = self.sessions[conv]
+        if T3:
+            return self.launch_t3(conv, system, task)
         system_file, prompt_file = STATE_DIR / f"{conv}.system.md", STATE_DIR / f"{conv}.prompt.md"
         system_file.write_text(system)
         prompt_file.write_text(task)
@@ -941,6 +1107,23 @@ class Listener:
             log("launch failed", conv, res)
             post(self.web, conv, f"Could not start Claude: {res.get('error')}")
         return handle
+
+    def launch_t3(self, conv: str, system: str, task: str) -> str | None:
+        """Give the task's thread its files and the task. A relaunch makes a new thread in the same worktree."""
+        s = self.sessions[conv]
+        write_agent_files(s["workspace"], conv, system)
+        thread = s.pop("new_thread", None)
+        if not thread:
+            res = t3_launch(f"slack {s['name']}", {"type": "existing_worktree", "worktreePath": s["workspace"]})
+            thread = res.get("thread")
+            if not thread:
+                log("launch failed", conv, res)
+                post(self.web, conv, f"Could not start the agent in T3: {res.get('error')}")
+                return None
+        if not t3_send(thread, task):
+            post(self.web, conv, f"Could not give the task to T3 thread {thread}; see the listener log.")
+            return None
+        return thread
 
     def on_message(self, conv: str, user: str, raw: str, text: str, ts: str) -> None:
         s = self.sessions[conv]
@@ -1046,9 +1229,15 @@ class Listener:
                 pass
         line = (f"[slack] {self.display(user)}" + (" (maybe not to you)" if unsure else "")
                 + (" " if raw else ": ") + text.replace("\n", " ⏎ ") + digest)
-        handle = s.get("terminal")
-        if handle and orca("terminal", "send", "--terminal", handle, "--text", line).get("ok"):
-            orca("terminal", "send", "--terminal", handle, "--enter")
+        handle = s.get(HANDLE)
+        if T3:
+            # A thread whose last turn failed takes the message too: T3 resumes its session in a new turn.
+            delivered = bool(handle) and t3_thread(handle) is not None and t3_send(handle, line)
+        else:
+            delivered = bool(handle) and orca("terminal", "send", "--terminal", handle, "--text", line).get("ok")
+            if delivered:
+                orca("terminal", "send", "--terminal", handle, "--enter")
+        if delivered:
             set_status(self.web, conv, "processing")
             s["last"] = time.time()
             self.save()
@@ -1056,16 +1245,18 @@ class Listener:
             return
         if not self.owner(user):
             return
-        # The Claude tab is gone: start a new session that carries the message.
+        # The Claude tab (or the T3 thread) is gone: start a new session that carries the message.
         system = system_prompt(conv=conv, where="the same conversation as before", decide="",
                                workspace=s["workspace"], branch=s["branch"])
         task = TASK.format(who=self.display(user), origin_link=f'{s["origin"]} {s["ts"]}', origin=s["origin"],
                            ts=s["ts"], text=text + "\n\n(The earlier Claude session of this conversation ended; "
                                                   "read its history with the Slack connector if you need it.)")
-        s["terminal"] = self.launch(conv, system, task)
+        if T3 and handle:
+            t3("t3_thread_organize", {"threadId": handle, "action": "archive"})
+        s[HANDLE] = self.launch(conv, system, task)
         set_status(self.web, conv, "processing")
         self.save()
-        log("relaunched", conv, s["terminal"])
+        log("relaunched", conv, s[HANDLE])
 
     def close(self, conv: str, text: str) -> None:
         channel, thread = split(conv)
@@ -1079,9 +1270,12 @@ class Listener:
     def stop(self, event: dict) -> None:
         conv = self.conv_of(event.get("channel"), event.get("thread_ts"))
         s = self.sessions.get(conv or "")
-        if not s or not s.get("terminal"):
+        if not s or not s.get(HANDLE):
             return
-        orca("terminal", "send", "--terminal", s["terminal"], "--text", "\x1b")
+        if T3:
+            t3("t3_thread_interrupt", {"threadId": s[HANDLE], "reason": "stopped from Slack"})
+        else:
+            orca("terminal", "send", "--terminal", s["terminal"], "--text", "\x1b")
         end_stream(self.web, conv, "active")  # a plan left streaming would end as "Something went wrong"
         set_status(self.web, conv, "active")
         post(self.web, conv, f"Stopped by {self.display(event.get('user'))}. Send a message to go on.")
@@ -1094,10 +1288,13 @@ class Listener:
         self.save()
         preview_stop(conv)
         for c in {conv, s.get("thread_conv") or conv}:  # a moved session also has its thread's files
-            for suffix in (".json", ".prompt.md", ".system.md"):
+            for suffix in (".json", ".prompt.md", ".system.md", "-preview.log"):
                 (STATE_DIR / f"{c}{suffix}").unlink(missing_ok=True)
         if s.get("terminal"):
             orca("terminal", "close", "--terminal", s["terminal"])
+        if s.get("thread"):
+            t3("t3_thread_interrupt", {"threadId": s["thread"], "reason": "the Slack task ended"})
+            t3("t3_thread_organize", {"threadId": s["thread"], "action": "archive"})
         ws = s.get("workspace")
         if not ws or Path(ws) == Path(CONFIG["workspace"]):
             return
@@ -1109,6 +1306,19 @@ class Listener:
                                       text=f"Task {s['name']} is closed. I kept its workspace `{ws}`: "
                                            "its branch has work that is not pushed.")
             log("closed, kept", conv, ws)
+        elif T3:
+            if CONFIG["cleanup_command"]:  # the repo's own cleanup, before its workspace goes
+                try:
+                    done = subprocess.run(CONFIG["cleanup_command"], shell=True, cwd=ws, capture_output=True,
+                                          text=True, timeout=600)
+                    log("cleanup command", conv, done.returncode, (done.stdout + done.stderr).strip()[-300:])
+                except subprocess.TimeoutExpired:
+                    log("cleanup command timed out", conv)
+            repo = ["git", "-C", CONFIG["repo"]]
+            removed = subprocess.run([*repo, "worktree", "remove", "--force", ws], capture_output=True, text=True)
+            if s.get("branch"):
+                subprocess.run([*repo, "branch", "-D", s["branch"]], capture_output=True)
+            log("closed, removed", conv, ws, removed.stderr.strip()[:200])
         else:
             orca("worktree", "rm", "--worktree", f"path:{ws}")
             log("closed, removed", conv, ws)
@@ -1133,8 +1343,15 @@ class Listener:
     def watch_work(self) -> None:
         """Keep each code channel's Code tab and PR link current from its workspace, whatever agent works there."""
         checked: dict[str, tuple[str, float]] = {}
+        t3_checked = 0.0
         while True:
             time.sleep(WATCH_S)
+            if T3 and time.time() - t3_checked > T3_CHECK_S:
+                t3_checked = time.time()
+                try:
+                    self.watch_threads()
+                except Exception as exc:
+                    log("thread watch failed", repr(exc))
             for conv, session in list(self.sessions.items()):
                 channel, thread = split(read_json(conv_state(conv), {}).get("moved_to") or conv)
                 ws = session.get("workspace")
@@ -1155,6 +1372,28 @@ class Listener:
                             publish_controls(self.web, channel)
                 except Exception as exc:  # one broken workspace must not stop the watch
                     log("watch failed", conv, repr(exc))
+
+
+    def watch_threads(self) -> None:
+        """Say in Slack when a task's T3 turn failed: the agent cannot say it, and the session would
+        stay "processing" with nothing behind it."""
+        mine = {s.get("thread"): conv for conv, s in self.sessions.items() if s.get("thread")}
+        if not mine:
+            return
+        listed = t3("t3_thread_list", {"projectId": t3_project(), "statuses": ["failed"], "limit": 100})
+        for thread in listed.get("threads", []):
+            conv = mine.get(thread.get("threadId"))
+            run = thread.get("latestRunId")
+            if not conv or self.sessions[conv].get("failed_run") == run:
+                continue
+            with self.lock:
+                self.sessions[conv]["failed_run"] = run
+                self.save()
+                to = read_json(conv_state(conv), {}).get("moved_to") or conv
+                end_stream(self.web, to, "active")
+                set_status(self.web, to, "active")
+                post(self.web, to, "The agent's turn failed in T3 Code. Send a message to go on.")
+            log("thread failed", conv, thread.get("threadId"), run)
 
 
 def respond(url: str | None, body: dict) -> None:
@@ -1218,7 +1457,9 @@ def listen() -> None:
     threading.Thread(target=bot.watch_work, daemon=True).start()
     if CONFIG["test_ui"]:
         threading.Thread(target=serve_test_ui, daemon=True).start()
-    log("listening as", bot.bot_user, "workspace", CONFIG["workspace"])
+    log("listening as", bot.bot_user, "workspace", CONFIG["workspace"], "backend", CONFIG["backend"])
+    if T3 and not t3_project():
+        log("no T3 project has the folder", CONFIG["repo"], "- tasks cannot start; add it with `t3 project add`")
     down_since = None
     while True:
         time.sleep(30)
