@@ -72,9 +72,9 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
 
 ## Install
 
-1. **Get the code.**
+1. **Get the code.** Clone this repo anywhere; below, `<checkout>` is that folder.
    ```sh
-   git clone https://github.com/pawel-kotowski/slack-agent.git ~/projects/slack-agent
+   git clone <this repo's URL> <checkout>
    ```
 2. **Make the Slack app.** At api.slack.com/apps → Create New App → From a manifest, paste
    [`manifest.example.json`](manifest.example.json) with your bot's name, descriptions and
@@ -93,13 +93,13 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
    `config-access` and `config-refresh` (api.slack.com/apps → Your App Configuration Tokens).
    Check: `security find-generic-password -s slack-agent -a bot -w` prints the token.
 5. **Make the listener's workspace.** In Orca, add the repo and create a workspace for the
-   listener (for example `~/orca/workspaces/<repo>/slack-agent`). Task workspaces are made as
-   its children.
+   listener, named for example `slack-agent`; below, `<listener workspace>` is its folder. Task
+   workspaces are made as its children.
 6. **Write the config.** Copy [`config.example.json`](config.example.json) to
    `~/.config/slack-agent/config.json` (or anywhere, and point `SLACK_AGENT_CONFIG` at it) and
    fill it in; the keys are in the table below. Slack user IDs are in each profile → ⋮ → Copy
    member ID.
-   Check: `slack-agent --help` prints the help without "no config".
+   Check: `<checkout>/slack-agent --help` prints the help without "no config".
 7. **Previews (optional).** Start a PostgreSQL container and store its password:
    ```sh
    docker run -d --name slack-agent-pg -e POSTGRES_PASSWORD=… -p 127.0.0.1:55432:5432 postgres:16
@@ -110,8 +110,8 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
    Leave `preview` as `null` to switch previews off (the slash commands go too).
 8. **Start the listener** in a terminal of the listener's workspace:
    ```sh
-   orca terminal create --worktree path:~/orca/workspaces/<repo>/slack-agent \
-     --title "slack-agent listener" --command '~/projects/slack-agent/slack-agent listen'
+   orca terminal create --worktree "path:<listener workspace>" \
+     --title "slack-agent listener" --command '<checkout>/slack-agent listen'
    ```
    Check: the log (`<state_dir>/listener.log`) ends with `listening as U…`.
 9. **Try it.** DM the bot "what does this repo do? no changes". It reacts 👀, answers in the

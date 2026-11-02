@@ -7,12 +7,12 @@
     "U0123OWNER": "Ada",
     "U0456TEAMMATE": "Ben"
   },
-  "repo": "~/projects/your-repo",
+  "repo": "/path/to/your-repo",
   "repo_label": "your-org/your-repo",
   "repo_url": "https://github.com/your-org/your-repo",
   "project": "your-repo: one line on what the project is, so the screen can tell project requests from others",
   "project_notes": "Before you build or run tests, run `make setup`. Never run the full test suite without asking {owner}.",
-  "workspace": "~/orca/workspaces/your-repo/slack-agent",
+  "workspace": "/path/to/the/listener/workspace",
   "agent_command": [
     "claude"
   ],
