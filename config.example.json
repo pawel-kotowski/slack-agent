@@ -1,0 +1,41 @@
+{
+  "bot_name": "your-name-agent",
+  "owners": {
+    "U0123OWNER": "Ada"
+  },
+  "wakers": {
+    "U0123OWNER": "Ada",
+    "U0456TEAMMATE": "Ben"
+  },
+  "repo": "~/projects/your-repo",
+  "repo_label": "your-org/your-repo",
+  "repo_url": "https://github.com/your-org/your-repo",
+  "project": "your-repo: one line on what the project is, so the screen can tell project requests from others",
+  "project_notes": "Before you build or run tests, run `make setup`. Never run the full test suite without asking {owner}.",
+  "workspace": "~/orca/workspaces/your-repo/slack-agent",
+  "agent_command": [
+    "claude"
+  ],
+  "usage_check": null,
+  "claude_projects": "~/.claude/projects",
+  "keychain_service": "slack-agent",
+  "test_ui": false,
+  "ui_port": 8791,
+  "ui_origin": "https://your-mac.your-tailnet.ts.net:10000",
+  "preview": {
+    "pg_container": "slack-agent-pg",
+    "pg_port": 55432,
+    "user": "dev",
+    "env": {
+      "APP_ADMIN_USER": "{user}",
+      "APP_ADMIN_PASSWORD": "{password}",
+      "DATABASE_URL": "postgresql://postgres:{pg_password}@127.0.0.1:{pg_port}/{db}",
+      "APP_ALLOWED_HOSTS": "{host}",
+      "APP_PREVIEW_BRANCH": "{branch}"
+    },
+    "setup": "make setup",
+    "setup_marker": ".slack-agent-setup-done",
+    "command": "make dev API_PORT={api} UI_PORT={ui}"
+  },
+  "extensions": []
+}

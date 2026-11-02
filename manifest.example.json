@@ -1,0 +1,79 @@
+{
+  "display_information": {
+    "name": "your-name-agent",
+    "description": "Your Claude agent: opens code channels and works in your Orca workspaces"
+  },
+  "features": {
+    "app_home": {
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "your-name-agent",
+      "always_online": true
+    },
+    "code_channels": {
+      "enabled": true
+    },
+    "agent_view": {
+      "agent_description": "Your Claude Code agent for your-repo. Answers in place, or opens a code channel for work with several steps.",
+      "suggested_prompts": [
+        {
+          "title": "Explain a concept",
+          "message": "Explain how <part of the project> works, in a few sentences."
+        },
+        {
+          "title": "Fix something",
+          "message": "Fix this in your-repo and show me the diff: "
+        },
+        {
+          "title": "Review naming",
+          "message": "Find naming inconsistencies between the docs and the code."
+        }
+      ]
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "code_channels:manage",
+        "im:history",
+        "im:read",
+        "channels:history",
+        "groups:history",
+        "reactions:write",
+        "users:read",
+        "canvases:read",
+        "canvases:write",
+        "files:write",
+        "channels:read",
+        "groups:read",
+        "assistant:write"
+      ]
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im",
+        "message.channels",
+        "message.groups",
+        "agent_session_stopped",
+        "channel_archive",
+        "group_archive",
+        "agent_session_title_changed",
+        "app_home_opened"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false,
+    "interactivity": {
+      "is_enabled": true
+    }
+  }
+}
