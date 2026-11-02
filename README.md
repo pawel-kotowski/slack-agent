@@ -58,6 +58,10 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   buttons and archives the code channel. The workspace is removed when its branch has nothing
   unpushed; otherwise the bot says where it kept it.
 
+- **Backends.** By default each task is an Orca workspace with Claude Code in an Orca terminal.
+  With `"backend": "t3"` it is a [T3 Code](https://t3.codes) thread in its own worktree instead
+  (below, [On T3 Code](#on-t3-code)); the rest is the same.
+
 [NOTES.md](NOTES.md) has the design decisions, what Slack allows and what went wrong on the way.
 
 ## What you need
@@ -66,6 +70,7 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   private file (step 4). On Linux, Orca's CLI is `orca-ide` (`orca` there is often GNOME's screen
   reader); the script calls `orca-ide` when it exists.
 - [Orca](https://github.com/stablyai/orca) with its `orca` CLI on `PATH`: workspaces and terminals.
+  Or, with `"backend": "t3"`, a running T3 Code server and a `t3_tool` command (below).
 - [Claude Code](https://claude.com/claude-code), signed in to the subscription the bot should use.
 - [uv](https://docs.astral.sh/uv/) (the script declares its one dependency, `slack_sdk`, inline).
 - `git` and `gh` (signed in) for the repo the bot works on.
@@ -138,7 +143,7 @@ One JSON file per bot. `~` is expanded in paths and in the two command lists.
 | `repo`, `repo_label`, `repo_url` | The repo tasks work on: local checkout, `org/name`, web address. |
 | `project` | One line on what the project is. The screen holds requests that are not about it. |
 | `project_notes` | Extra instructions for the agent about this project (setup, what not to start without asking). `{owner}` is replaced. |
-| `workspace` | The listener's Orca workspace; task workspaces are its children. |
+| `workspace` | The listener's Orca workspace; task workspaces are its children. On T3, the listener's own checkout (never removed). |
 | `agent_command` | How to start Claude Code, as a list: `["claude"]`, or a wrapper that picks an account. The screen uses it too. |
 | `claude_args` | Arguments for every session. Default: `--dangerously-skip-permissions --disallowedTools=AskUserQuestion` (the session is unattended; questions go through `slack-agent ask`). |
 | `usage_check` | Optional command; exit code 1 means the subscription is nearly spent, and no new task starts. |
@@ -148,6 +153,11 @@ One JSON file per bot. `~` is expanded in paths and in the two command lists.
 | `preview` | `null`, or the preview block: `pg_container`, `pg_port`, `user`, `env` (variables for the app; `{user} {password} {db} {pg_port} {pg_password} {host} {branch} {api} {ui}` are filled in), `setup` (runs once per workspace), `setup_marker`, `command` (starts the app on `{api}` and `{ui}`). |
 | `ui_origin` | The public address previews are served at (Tailscale Funnel). |
 | `test_ui`, `ui_port` | Test feature: a Live HTML tab (the session's state, from Claude's transcripts) and a Controls tab per code channel, served by the listener on `ui_port` behind `ui_origin/s`. |
+| `backend` | `orca` (default): a task is an Orca workspace and a terminal. `t3`: a T3 Code thread in its own worktree (below). |
+| `t3_tool` | T3 only. The command that calls one T3 MCP tool: `<cmd> <tool> '<json args>'` prints the result as JSON, and on an error exits 1 with the error on stderr. Default `["t3-tool"]`. |
+| `t3_project` | T3 only. The T3 project id of `repo`; when `null`, the project whose folder is `repo`. |
+| `t3_instance`, `t3_model` | T3 only. The provider instance (a Claude instance in T3's settings, which picks the subscription) and model of every task thread. |
+| `cleanup_command` | T3 only. Optional shell command run in a task's workspace before it is removed: the repo's own cleanup (stopping its containers, deleting test accounts). |
 | `extensions` | Python files outside this repo with project-specific additions (below). Any other key in the config is theirs to read. |
 
 ## Extensions
@@ -194,9 +204,26 @@ different `ui_origin` ports and PostgreSQL containers.
 - **Bot photo:** it is the app icon, set at api.slack.com/apps → your app → Basic Information.
   There is no API for it.
 
-## Without Orca
+## On T3 Code
 
-Orca gives each task a git worktree and a terminal the listener can type into and read. The
-listener calls it in a few places (`orca worktree create`, `orca terminal create|send|close`);
-`git worktree add` plus `tmux new-session -d` / `tmux send-keys` would do the same job. That
-port is not written yet.
+With `"backend": "t3"`, the listener runs each task as a T3 Code thread, through T3's MCP tools
+(`t3_tool` calls them), instead of Orca:
+
+- **A task** is a thread in a new worktree from the newest `origin/main` (branch named after the
+  task), on `t3_instance` and `t3_model`, at full access. The listener makes it idle, writes the
+  agent's files into the worktree, then sends the task as the first message.
+- **The agent's setup** comes from two files in its worktree, because T3 gives the agent no
+  per-thread command line or environment: `.claude/settings.local.json` (the `slack-agent gate`
+  hook, `SLACK_AGENT_CONV`, `SLACK_AGENT_CONFIG`, and a deny rule for `AskUserQuestion`) and
+  `CLAUDE.local.md` (the Slack rules). Both are added to the repo's `.git/info/exclude`.
+  `claude_args` and `agent_command` do not apply to task threads (the screen still uses
+  `agent_command`); set `claude_projects` to the instance's home's `projects` folder for the Live tab.
+- **Messages** go in with `t3_thread_send` (`auto`: starts an idle thread or steers a running
+  turn); Compact sends `/compact` after the running turn; Slack's stop button interrupts the turn.
+  A message to a thread that is gone or archived starts a new thread in the same worktree that
+  carries it. When a turn fails, the listener says so in Slack (checked every 30 s).
+- **Previews** run as a transient `systemd-run --user` unit on Linux and as a detached process
+  elsewhere, and stop with the task.
+- **Cleanup** archives the thread, runs `cleanup_command`, and removes the worktree and its branch,
+  when nothing is unpushed (as with Orca).
+- Add the repo to T3 first (`t3 project add <repo>`). The listener does not need Orca.
