@@ -72,9 +72,9 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
 
 ## Install
 
-1. **Get the code.** Clone this repo anywhere; below, `<checkout>` is that folder.
+1. **Get the code.** Clone it wherever you keep code; below, `<checkout>` is the folder it makes.
    ```sh
-   git clone <this repo's URL> <checkout>
+   git clone https://github.com/pawel-kotowski/slack-agent.git
    ```
 2. **Make the Slack app.** At api.slack.com/apps → Create New App → From a manifest, paste
    [`manifest.example.json`](manifest.example.json) with your bot's name, descriptions and
