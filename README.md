@@ -176,6 +176,9 @@ different `ui_origin` ports and PostgreSQL containers.
 
 ## Running it
 
+- **Always on (Linux):** run the listener as a systemd user service with `Restart=always`
+  (`Environment=SLACK_AGENT_CONFIG=…`, `ExecStart=<path>/slack-agent listen`, `WantedBy=default.target`)
+  and `loginctl enable-linger` so it starts at boot without a login. The lock keeps it to one.
 - **Log:** `<state_dir>/listener.log`. Every tag is logged as `mention` when it arrives, so a tag
   that does nothing shows there. `wake` / `skip` lines say what the screen decided and why.
 - **Restart:** list the listener's PIDs with `ps -axo pid,command | grep "[s]lack-agent listen"`
