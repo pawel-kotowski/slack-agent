@@ -15,7 +15,8 @@ Helpers the Claude sessions call:
   slack-agent approve <conv> <what>           post Approve/Deny buttons, wait for an owner's click; exit 0 = approved
   slack-agent status <conv> <status>          active | processing | suspended | closed
   slack-agent rename <conv> <title>           rename the session (and the code channel)
-  slack-agent step <conv> <id> <status> <title> [<details>]   a live thinking step: pending | in_progress | complete | error
+  slack-agent step <conv> <id> <status> <title> [<details>]   a live thinking step: pending | in_progress | complete | error;
+                                              Slack appends each <details> to the step's earlier ones
   slack-agent open-channel <conv> <title>     move a session thread to a new code channel; prints its ID
   slack-agent finish <conv>                   post stdin as the summary; archive the code channel or close the thread
   slack-agent file <conv> <path> [<comment>]  upload a file
@@ -546,7 +547,10 @@ How to work:
   Keep replies short. For work with several steps, show them live as thinking steps:
   `slack-agent step <conv> 1 in_progress "Read the docs"`, then `... 1 complete "Read the docs"`.
   Close every step you open: `complete` when done, `error` when it failed; if you change course,
-  mark the dropped step `complete` with details saying why.
+  mark the dropped step `complete` with details saying why. Never end a turn with a step open,
+  also not to wait for background work (CI, a build): close it with what you wait for, and open a
+  new step when the work comes back. A step left open shows "Something went wrong". Each
+  `details` is added to the step's earlier ones, not put in their place: give details once.
 - Session status: when a reply is complete and you wait for the next message, run
   `slack-agent status <conv> active`. When you need an answer before you can go on, post the
   question with `slack-agent ask <conv>` instead of `say` (it sets the status to suspended). When the

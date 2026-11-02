@@ -91,7 +91,11 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   button (`agent_session_stopped`, which sends Escape to the agent). `processing` falls back to
   `active` after an hour; the listener renews it.
 - **Thinking steps:** `chat.startStream` with `task_display_mode: plan`, then `chat.appendStream`;
-  Slack ends a stream 10 minutes after it starts, so a new one starts after 9.
+  Slack ends a stream 10 minutes after it starts, so a new one starts after 9. A step still `in_progress`
+  when the stream ends shows "Something went wrong" with a warning sign, and each update's
+  `details` is appended to the step's earlier details, not put in their place (2026-11-02: an
+  agent left a "CI" step open to wait for CI in the background, and its details came out glued
+  together). The system prompt says: no open step at the end of a turn, details once.
 - **HTML tabs:** inline scripts run; scripts and images load from origins in
   `csp.resource_domains`; `fetch()` is blocked, so live data comes as a script (JSONP); iframes stay
   empty; links do not open. To open a site, use a Block Kit button with a `url` or a context bar
