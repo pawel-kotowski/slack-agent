@@ -62,7 +62,9 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
 
 ## What you need
 
-- macOS (tokens live in the Keychain; the `security` CLI).
+- macOS or Linux. On macOS the tokens live in the Keychain (the `security` CLI); on Linux in a
+  private file (step 4). On Linux, Orca's CLI is `orca-ide` (`orca` there is often GNOME's screen
+  reader); the script calls `orca-ide` when it exists.
 - [Orca](https://github.com/stablyai/orca) with its `orca` CLI on `PATH`: workspaces and terminals.
 - [Claude Code](https://claude.com/claude-code), signed in to the subscription the bot should use.
 - [uv](https://docs.astral.sh/uv/) (the script declares its one dependency, `slack_sdk`, inline).
@@ -92,6 +94,12 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
    Optional, for `slack-agent rotate` and manifest changes by API: the app configuration tokens as
    `config-access` and `config-refresh` (api.slack.com/apps → Your App Configuration Tokens).
    Check: `security find-generic-password -s slack-agent -a bot -w` prints the token.
+
+   On Linux, put them in `~/.config/slack-agent/<service>.json` instead, readable by you only:
+   ```sh
+   install -D -m 600 /dev/null ~/.config/slack-agent/slack-agent.json
+   echo '{"bot": "xoxb-…", "app": "xapp-…"}' > ~/.config/slack-agent/slack-agent.json
+   ```
 5. **Make the listener's workspace.** In Orca, add the repo and create a workspace for the
    listener, named for example `slack-agent`; below, `<listener workspace>` is its folder. Task
    workspaces are made as its children.

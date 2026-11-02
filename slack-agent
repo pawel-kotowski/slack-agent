@@ -39,6 +39,7 @@ Extensions (the config's `extensions`) may add commands of their own.
 
 Settings come from the JSON file in $SLACK_AGENT_CONFIG (default ~/.config/slack-agent/config.json);
 see config.example.json. Tokens live in the macOS Keychain, service `keychain_service`: bot, app.
+On Linux they live in ~/.config/slack-agent/<keychain_service>.json (mode 600), one key per name.
 """
 
 import faulthandler
@@ -50,6 +51,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -184,11 +186,30 @@ CLASSIFIER_ARGS = ["-p", "--model", "haiku", "--system-prompt", CLASSIFIER_SYSTE
 DIGEST_CHARS = 3000
 
 
+SECRETS_FILE = HOME / ".config/slack-agent" / f"{CONFIG['keychain_service']}.json"
+
+
 def secret(name: str) -> str:
+    if sys.platform != "darwin":
+        return json.loads(SECRETS_FILE.read_text())[name]
     return subprocess.run(
         ["security", "find-generic-password", "-s", CONFIG["keychain_service"], "-a", name, "-w"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
+
+
+def store_secret(name: str, value: str) -> None:
+    if sys.platform == "darwin":
+        subprocess.run(["security", "add-generic-password", "-U", "-s", CONFIG["keychain_service"], "-a", name,
+                        "-w", value], check=True)
+        return
+    data = json.loads(SECRETS_FILE.read_text()) if SECRETS_FILE.exists() else {}
+    data[name] = value
+    SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SECRETS_FILE.with_suffix(".tmp")
+    tmp.touch(mode=0o600)
+    tmp.write_text(json.dumps(data, indent=1))
+    tmp.replace(SECRETS_FILE)
 
 
 def log(*parts: object) -> None:
@@ -259,8 +280,12 @@ def post(web: WebClient, conv: str, text: str, blocks: list | None = None) -> st
         return web.chat_postMessage(channel=channel, thread_ts=thread, text=text)["ts"]
 
 
+# On Linux, `orca` is often GNOME's screen reader; Orca's own CLI is `orca-ide` there.
+ORCA = "orca-ide" if sys.platform != "darwin" and shutil.which("orca-ide") else "orca"
+
+
 def orca(*args: str) -> dict:
-    out = subprocess.run(["orca", *args, "--json"], capture_output=True, text=True)
+    out = subprocess.run([ORCA, *args, "--json"], capture_output=True, text=True)
     try:
         return json.loads(out.stdout)
     except json.JSONDecodeError:
@@ -1366,8 +1391,7 @@ def main(argv: list[str]) -> None:
     if cmd == "rotate":
         data = WebClient().api_call("tooling.tokens.rotate", params={"refresh_token": secret("config-refresh")}).data
         for name, key in (("config-access", "token"), ("config-refresh", "refresh_token")):
-            subprocess.run(["security", "add-generic-password", "-U", "-s", CONFIG["keychain_service"], "-a", name,
-                            "-w", data[key]], check=True)
+            store_secret(name, data[key])
         print("config token valid until", time.strftime("%Y-%m-%d %H:%M", time.localtime(data["exp"])))
         return
     web = WebClient(token=secret("bot"))
