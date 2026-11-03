@@ -588,6 +588,12 @@ def publish_controls(web: WebClient, channel: str) -> None:
                   {"type": "mrkdwn", "text": f"*Password*\n`{preview['password']}`" if preview.get("private")
                    else "*Password*\nrun `/preview-login`"}]},
               {"type": "divider"}] if preview else [])
+    if not preview and state.get("preview_displaced_by"):
+        at = time.strftime("%H:%M", time.localtime(state.get("preview_displaced_at") or time.time()))
+        login = [{"type": "section", "text": {"type": "mrkdwn", "text":
+                  f"*No preview here now.* <#{state['preview_displaced_by']}> took the preview address at {at} "
+                  "(one preview runs at a time). It comes back here when that one stops; `/preview` starts it now."}},
+                 {"type": "divider"}]
     blocks = login + [{"type": "section", "text": {"type": "mrkdwn", "text": "*Controls* (test). Only people who can wake the agent may use them; Finish is the owner's."}},
               {"type": "actions", "elements": links + [
                   {"type": "button", "text": {"type": "plain_text", "text": label}, "action_id": aid, "value": channel,
@@ -612,11 +618,14 @@ def preview_start(web: WebClient, channel: str) -> dict:
         other = f.stem
         if read_json(f, {}).get("preview"):
             preview_stop(other)
+            if other != channel:
+                update_state(other, preview_displaced_by=channel, preview_displaced_at=time.time())
             if other != channel and CONFIG["test_ui"]:
                 try:
                     publish_controls(web, other)
                 except SlackApiError:
                     pass
+    update_state(channel, preview_displaced_by=None)
     state = read_json(conv_state(channel), {})
     ws = Path(state["workspace"])
     db = "preview_" + re.sub(r"[^a-z0-9]", "_", ws.name.lower())
@@ -662,6 +671,22 @@ def preview_start(web: WebClient, channel: str) -> dict:
         hook(web, channel)
     log("preview started", channel, ws.name, f"ui {ui} api {api}")
     return preview
+
+
+def preview_restore(web: WebClient, freed_by: str) -> None:
+    """After `freed_by`'s preview stopped, start again the preview it displaced most recently."""
+    waiting = []
+    for f in STATE_DIR.glob("*.json"):
+        st = read_json(f, {})
+        if st.get("preview_displaced_by") == freed_by and st.get("workspace") and st.get("status") != "closed":
+            waiting.append((st.get("preview_displaced_at") or 0, f.stem))
+    if waiting:
+        channel = max(waiting)[1]
+        try:
+            preview_start(web, channel)
+            log("preview restored", channel, "after", freed_by)
+        except Exception as exc:  # noqa: BLE001 — a restore must never break the cleanup
+            log("preview restore failed", channel, exc)
 
 
 def preview_stop(channel: str) -> None:
@@ -787,7 +812,8 @@ How to work:
   - context bar (top of the channel, max 5 items): `slack-agent bar <channel> pr "PR #12 open" <url> link`;
     keep labels current
   - pages, canvases and files: `slack-agent html|canvas|file <channel> ...` (keep such files in /tmp);
-    `slack-agent tab <channel> --remove <name>` removes a tab you added
+    `slack-agent tab <channel> --remove <name>` removes a tab you added (and its canvas); never
+    delete a tab's canvas or file yourself: a tab whose file is gone stays empty and cannot be removed
   - if the focus of the task changes: `slack-agent rename <conv> "<new title>"`
 {preview}"""
 PREVIEW_LINE = """  - preview: `slack-agent preview <channel>` runs the app from your workspace's checkout with
@@ -1327,7 +1353,10 @@ class Listener:
         if not s:
             return
         self.save()
+        had_preview = bool(read_json(conv_state(conv), {}).get("preview"))
         preview_stop(conv)
+        if had_preview:
+            preview_restore(self.web, conv)
         for c in {conv, s.get("thread_conv") or conv}:  # a moved session also has its thread's files
             for suffix in (".json", ".prompt.md", ".system.md", "-preview.log"):
                 (STATE_DIR / f"{c}{suffix}").unlink(missing_ok=True)
@@ -1728,7 +1757,10 @@ def main(argv: list[str]) -> None:
             sys.exit("slack-agent: no preview is set up in the config")
         print(preview_start(web, channel)["url"])
     elif cmd == "preview-stop" and len(rest) == 1:
+        had_preview = bool(state.get("preview"))
         preview_stop(channel)
+        if had_preview:
+            preview_restore(web, channel)
     elif cmd == "test-ui" and len(rest) == 1:
         publish_test_ui(web, channel)
     elif cmd == "file" and len(rest) in (2, 3):
@@ -1753,7 +1785,17 @@ def main(argv: list[str]) -> None:
         gone = [v for v in views.get("session_views", []) + views.get("views", [])
                 if rest[2] in (v.get("name"), v.get("view_key"))]
         for v in gone:
-            web.api_call("agents.conversations.removeView", json={"channel_id": channel, "view_id": v["view_id"]})
+            try:
+                web.api_call("agents.conversations.removeView", json={"channel_id": channel, "view_id": v["view_id"]})
+            except SlackApiError as exc:
+                if exc.response.get("error") != "view_not_found":
+                    raise
+                sys.exit(f"Slack cannot remove the tab {rest[2]!r}: its file is gone. Ask a person to remove it in Slack.")
+            if v.get("type") == "canvas" and v.get("file_id"):  # the canvas goes after its tab, never before
+                try:
+                    web.api_call("canvases.delete", json={"canvas_id": v["file_id"]})
+                except SlackApiError:
+                    pass
         print(f"removed {len(gone)} tab(s)" if gone else f"no tab named {rest[2]!r}")
     elif cmd == "html" and len(rest) in (2, 3):
         path = Path(rest[1])

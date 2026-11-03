@@ -99,6 +99,11 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   `details` is appended to the step's earlier details, not put in their place (2026-11-02: an
   agent left a "CI" step open to wait for CI in the background, and its details came out glued
   together). The system prompt says: no open step at the end of a turn, details once.
+- **A tab whose file is gone cannot be removed** (2026-11-03): an agent deleted a canvas file
+  instead of removing its tab, and the tab (listed twice by `listViews`, once under the canvas
+  file's id) stayed as an empty tab; `removeView` answers `view_not_found` for both ids. Remove
+  the tab first (`slack-agent tab --remove` does, then deletes the canvas); an orphan needs a
+  person in the Slack app.
 - **HTML tabs:** inline scripts run; scripts and images load from origins in
   `csp.resource_domains`; `fetch()` is blocked, so live data comes as a script (JSONP); iframes stay
   empty; links do not open. To open a site, use a Block Kit button with a `url` or a context bar
@@ -130,6 +135,10 @@ Built 2026-10-29 and run first for one repo in one company workspace.
 - Project-specific Live-tab parts are extensions outside the repo (2026-11-02): the first one, a
   chart that knew an app's private API, was in the public code for 20 minutes.
 - One preview at a time per `ui_origin`: Funnel serves it at the root; `/s` stays the listener's.
+- A displaced preview is not silent (2026-11-03: a channel's Controls lost its link when another
+  channel started a preview, with nothing saying why). The displaced channel's Controls says who
+  took the address, and its preview starts again when that one stops (the task ends, or
+  `preview-stop`).
 
 ## T3 Code backend
 
