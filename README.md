@@ -52,7 +52,8 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   so another agent CLI gets it too. Only the approval gate is Claude-specific.
 - **Preview (optional).** `/preview` runs the task workspace's app on free ports with its own
   database in a PostgreSQL container, publishes it with Tailscale Funnel at `ui_origin`, and
-  posts the address and a one-off login. It stops, and the database is dropped, when the task
+  shows the address and a one-off login in the Controls tab (posts them when `test_ui` is off). The
+  agent starts one itself for any change people can run or see. It stops, and the database is dropped, when the task
   ends.
 - **Finish.** `/done`, the Finish button or the agent's `finish` posts a summary with feedback
   buttons and archives the code channel. The workspace is removed when its branch has nothing

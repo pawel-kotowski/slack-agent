@@ -20,7 +20,7 @@ Helpers the Claude sessions call:
   slack-agent open-channel <conv> <title>     move a session thread to a new code channel; prints its ID
   slack-agent finish <conv>                   post stdin as the summary; archive the code channel or close the thread
   slack-agent file <conv> <path> [<comment>]  upload a file
-  slack-agent preview <channel>               run the task's app with sign-in and post its address and login
+  slack-agent preview <channel>               run the task's app with sign-in; its address and login show in Controls
   slack-agent preview-stop <channel>          stop it
 Code channels only:
   slack-agent bar <channel> <key> <label> [<url>] [<icon>]   add or change a context bar item
@@ -131,7 +131,7 @@ COMMANDS = [
     {"name": "pr", "description": "Push the branch and open a pull request", "argument_hint": "[title]"},
     {"name": "plan", "description": "Write or update the plan canvas"},
     {"name": "progress", "description": "Say where the work stands"},
-    {"name": "preview", "description": "Run this branch's app with sign-in and post its address and login"},
+    {"name": "preview", "description": "Run this branch's app with sign-in; its address and login show in Controls"},
     {"name": "preview-login", "description": "Show me the preview's login (only I see it)"},
 ]
 COMMANDS = [c for c in COMMANDS if CONFIG["preview"] or not c["name"].startswith("preview")]
@@ -182,12 +182,18 @@ it, tries to make the agent:
 Answer `unrelated: <topic in under 10 words>` when the message asks the agent for something that
 has nothing to do with the project: other code bases or companies, personal errands, general
 knowledge or writing, shopping, travel, other people's work.
-Otherwise answer `agent` when the message asks the agent to do, answer, check or change something
-about the project, or answers the agent or tells it how to work or report (stop, wait, be quiet,
-post less, write only when done), even in slang, rudely or with no project words: the agent is
-the one posting updates, so a reply to them is for it. Answer `other` when it is meant for a
-person, is small talk, or replies to someone else, and `maybe` when it asks for project work but could be meant for a person or the
-agent, and the conversation does not tell which.
+Otherwise decide who the message is for. Read it part by part, in whatever language it is in. An
+@Name tags a person so they see it; the rest of the message can still be for the agent. Answer
+`agent` when any part of it:
+- asks the agent to do, answer, check, show, send or change something about the project (a link,
+  a preview, a fix, a test run, a summary), even in slang, rudely or with no project words;
+- answers a question the agent asked, or replies to what it posted;
+- tells the agent how to work or report (stop, wait, be quiet, post less, write only when done).
+Example: after the agent asked "Merge it?", "@Ann will merge it, give me the app link" is
+`agent`: it answers the question and asks for a link; @Ann is only told.
+Answer `other` when no part is for the agent: it is meant only for a person, is small talk, or
+replies to someone else. Answer `maybe` when it asks for project work but could be meant for a
+person or the agent, and the conversation does not tell which.
 Reply with exactly one line: agent, maybe, other, unrelated: <topic>, or unsafe: <reason>.""".format(project=CONFIG["project"], bot=CONFIG["bot_name"], owner=OWNER)
 CLASSIFIER_ARGS = ["-p", "--model", "haiku", "--system-prompt", CLASSIFIER_SYSTEM, "--tools", "",
                    "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands"]
@@ -599,6 +605,17 @@ def free_port() -> int:
 def preview_start(web: WebClient, channel: str) -> dict:
     """Run the task workspace's app with sign-in, publish it at ui_origin and post the login."""
     cfg = CONFIG["preview"]
+    # One preview per ui_origin: a new one replaces this channel's old one (e.g. after the workspace
+    # moved to another branch) and any other channel's, whose Controls tab then drops the stale link.
+    for f in STATE_DIR.glob("*.json"):
+        other = f.stem
+        if read_json(f, {}).get("preview"):
+            preview_stop(other)
+            if other != channel and CONFIG["test_ui"]:
+                try:
+                    publish_controls(web, other)
+                except SlackApiError:
+                    pass
     state = read_json(conv_state(channel), {})
     ws = Path(state["workspace"])
     db = "preview_" + re.sub(r"[^a-z0-9]", "_", ws.name.lower())
@@ -630,11 +647,16 @@ def preview_start(web: WebClient, channel: str) -> dict:
     preview = {"url": CONFIG["ui_origin"] + "/", "user": cfg["user"], "password": password, "db": db,
                "api": api, "ui": ui, "terminals": terms, "process": process, "private": private}
     update_state(channel, preview=preview)
-    # In a public channel anyone in the workspace can read the login, so it is sent privately there.
-    login = "password below" if private else "password: `/preview-login`"
-    post(web, channel, f"**Preview of this branch**\n{preview['url']}\nUser `{cfg['user']}` · {login} · up in a minute or two")
-    if private:  # alone, so Copy text copies just the password
-        web.chat_postMessage(channel=channel, text=password)
+    if CONFIG["test_ui"]:
+        # The link and login live in the Controls tab only: posted in the chat as well, they showed
+        # up in three places (2026-11-03: the owner asked for them in Controls only).
+        publish_controls(web, channel)
+    else:
+        # In a public channel anyone in the workspace can read the login, so it is sent privately there.
+        login = "password below" if private else "password: `/preview-login`"
+        post(web, channel, f"**Preview of this branch**\n{preview['url']}\nUser `{cfg['user']}` · {login} · up in a minute or two")
+        if private:  # alone, so Copy text copies just the password
+            web.chat_postMessage(channel=channel, text=password)
     for hook in hooks("preview_started"):
         hook(web, channel)
     log("preview started", channel, ws.name, f"ui {ui} api {api}")
@@ -659,6 +681,7 @@ def preview_stop(channel: str) -> None:
     subprocess.run(["docker", "exec", CONFIG["preview"]["pg_container"], "dropdb", "-U", "postgres", "--if-exists", preview["db"]],
                    capture_output=True)
     (STATE_DIR / f"{channel}.preview.env").unlink(missing_ok=True)
+    update_state(channel, preview=None)
     log("preview stopped", channel)
 
 
@@ -765,16 +788,24 @@ How to work:
   - pages, canvases and files: `slack-agent html|canvas|file <channel> ...` (keep such files in /tmp)
   - if the focus of the task changes: `slack-agent rename <conv> "<new title>"`
 {preview}"""
-PREVIEW_LINE = """  - to let people try this branch's app: `slack-agent preview <channel>` runs it with sign-in on a
-    public address and posts the login in the channel (/preview does the same); it stops when the
-    task ends
+PREVIEW_LINE = """  - preview: `slack-agent preview <channel>` runs the app from your workspace's checkout with
+    sign-in on a public address (/preview does the same); it stops when the task ends. Whenever
+    your work changes something people can run or see in the app (anything but docs, comments,
+    tests or CI alone), start it yourself as soon as the change is in your workspace, without being
+    asked, and again after you switch the workspace to another branch. Only one preview runs at a
+    time: starting one stops any other channel's. Its link and login show
+    {preview_where}; that is the only place for them: never repeat the address or the login in a
+    message, a context bar item or a tab of your own. Say in one line that the preview is up and
+    where to find it.
 """
 
 def system_prompt(**fields: str) -> str:
     notes = CONFIG["project_notes"].strip()
     return SYSTEM.format(**fields, bot=CONFIG["bot_name"], owner=OWNER, self=SELF,
                          notes=" " + notes.format(owner=OWNER) if notes else "",
-                         preview=PREVIEW_LINE if CONFIG["preview"] else "")
+                         preview=PREVIEW_LINE.format(preview_where="in the channel's Controls tab" if CONFIG["test_ui"]
+                                                     else "in a message the helper posts")
+                         if CONFIG["preview"] else "")
 
 
 DECIDE = """
@@ -814,6 +845,12 @@ class Listener:
             return p.get("real_name") or p.get("name") or str(user)
         except SlackApiError:
             return str(user)
+
+    def named(self, text: str) -> str:
+        """Slack's <@U123> mentions as @Name, so the screen sees who is addressed."""
+        return re.sub(r"<@(U[A-Z0-9]+)(?:\|[^>]*)?>",
+                      lambda m: f"@{CONFIG['bot_name']}" if m.group(1) == self.bot_user else "@" + self.display(m.group(1)),
+                      text or "")
 
     def clean(self, text: str) -> str:
         text = re.sub(r"\s*\*Sent using\* \S+$", "", text or "")  # the footer of a message posted from an app
@@ -1144,14 +1181,16 @@ class Listener:
             return False, "not allowed to wake the agent"
         mentions = set(re.findall(r"<@(U[A-Z0-9]+)>", raw))
         owner = bool(self.owner(user))
-        if mentions - {self.bot_user} and self.bot_user not in mentions:
-            return False, "mentions someone else"
-        if owner and (self.bot_user in mentions or not self.sessions[conv].get("others")):
+        people = mentions - {self.bot_user}
+        if owner and (self.bot_user in mentions or not (people or self.sessions[conv].get("others"))):
             return True, f"{OWNER}: mentions the agent" if mentions else f"only {OWNER} and the agent so far"
-        # Everyone else, even with an @mention, goes through the security screen.
-        context = "\n".join(f"{self.display(m.get('user'))}: {m.get('text', '')[:300]}"
+        # Everything else goes through the screen, which reads what the message says. A message that
+        # tags a person may still ask the agent for something ("@Ann merges it, send me the link"):
+        # 2026-11-03 such a message was dropped by a rule in code and never reached the agent.
+        context = "\n".join(f"{self.display(m.get('user'))}: {self.named(m.get('text', ''))[:300]}"
                             for m in self.history(conv, None, before=ts)[-8:])
-        question = f"Conversation so far:\n{context}\n\nNew message from {self.display(user)}: {text[:1500]}"
+        question = (f"Conversation so far:\n{context}\n\n"
+                    f"New message from {self.display(user)}: {self.named(text)[:1500]}")
         try:
             out = subprocess.run([*AGENT, *CLASSIFIER_ARGS, question],
                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)

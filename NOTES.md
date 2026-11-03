@@ -34,8 +34,11 @@ Built 2026-10-29 and run first for one repo in one company workspace.
 - Only people in `wakers` can wake the agent. Solo (only an owner and the bot so far), the owner's
   messages wake it directly. Once anyone else has written, every message is screened, the owner's
   too, since they may be answering a teammate.
-- An explicit @mention of the bot always wakes it; a message that @mentions another person and not
-  the bot never does.
+- An owner's @mention of the bot always wakes it. Every other message, also one that @mentions a
+  person and not the bot, goes to the screen, which sees mentions as `@Name`. Until 2026-11-03 code
+  dropped any message tagging a person: "@<teammate> will merge it, give me the app link" never
+  reached the agent. The screen now answers `agent` when any part of a message asks the agent
+  for something.
 - An owner's message is never held: the screen only tells whether it is addressed to the agent.
   An owner may ask the agent for anything, its own rules included.
 - The screen is Claude Haiku with Claude Code's prompt replaced (`--system-prompt … --tools ""
@@ -112,9 +115,13 @@ Built 2026-10-29 and run first for one repo in one company workspace.
 ## Preview
 
 - One shared account per preview (a random password): the app's first user, with a database of
-  its own, so nobody needs their own account. In a private channel the password is posted alone;
-  in a public one only the address is, and `/preview-login` shows the login privately to people on
-  the wake list. Controls shows link, user and password at the top.
+  its own, so nobody needs their own account. With `test_ui` on, the link and login are only in
+  the Controls tab (2026-11-03: posted in the chat too, and repeated by the agent in a bar item and
+  a tab of its own, one preview showed in three places); in a public channel Controls says to run
+  `/preview-login`, which shows the password privately to people on the wake list. Without
+  `test_ui`, the helper posts the address, and in a private channel the password alone.
+- The agent starts a preview itself whenever its change can be run or seen in the app (anything
+  but docs, comments, tests or CI alone), without being asked (2026-11-03: the logo PR got none).
 - The preview runs the same start script as a developer would (so `.env` loads). A start script
   that puts its servers in sessions of their own is not stopped by closing its terminal, so
   `preview_stop` also kills what listens on the preview's two ports.
