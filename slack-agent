@@ -28,6 +28,7 @@ Code channels only:
   slack-agent diff <channel> [<base>]         show `git diff <base>` of the cwd as the Code tab
   slack-agent html <channel> <file.html> [<tab name>]   a rendered HTML page as a tab
   slack-agent canvas <channel> <file.md> [<title>]      a Markdown canvas as a tab
+  slack-agent tab <channel> --remove <name>   remove a tab you added (by its name or file stem)
   slack-agent plan <channel> <file.md>        create or update the plan canvas (people comment, you edit)
   slack-agent comments <channel>              print the plan canvas and its open comments
 App management:
@@ -785,7 +786,8 @@ How to work:
     `slack-agent comments <channel>` shows what people commented on it
   - context bar (top of the channel, max 5 items): `slack-agent bar <channel> pr "PR #12 open" <url> link`;
     keep labels current
-  - pages, canvases and files: `slack-agent html|canvas|file <channel> ...` (keep such files in /tmp)
+  - pages, canvases and files: `slack-agent html|canvas|file <channel> ...` (keep such files in /tmp);
+    `slack-agent tab <channel> --remove <name>` removes a tab you added
   - if the focus of the task changes: `slack-agent rename <conv> "<new title>"`
 {preview}"""
 PREVIEW_LINE = """  - preview: `slack-agent preview <channel>` runs the app from your workspace's checkout with
@@ -1746,6 +1748,13 @@ def main(argv: list[str]) -> None:
         set_bar(web, channel, items)
     elif cmd == "diff" and len(rest) in (1, 2):
         show_diff(web, channel, ".", rest[1] if len(rest) == 2 else "origin/main")
+    elif cmd == "tab" and len(rest) == 3 and rest[1] == "--remove":
+        views = web.api_call("agents.conversations.listViews", json={"channel_id": channel}).data
+        gone = [v for v in views.get("session_views", []) + views.get("views", [])
+                if rest[2] in (v.get("name"), v.get("view_key"))]
+        for v in gone:
+            web.api_call("agents.conversations.removeView", json={"channel_id": channel, "view_id": v["view_id"]})
+        print(f"removed {len(gone)} tab(s)" if gone else f"no tab named {rest[2]!r}")
     elif cmd == "html" and len(rest) in (2, 3):
         path = Path(rest[1])
         print(web.api_call("agents.conversations.setView", json={
