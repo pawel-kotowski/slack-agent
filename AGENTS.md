@@ -15,5 +15,8 @@ Rules for agents changing this repo.
   Running it) and watch its log while you try the change in Slack.
 - Commit to `main` and push it to GitHub without asking, once the checks above pass and the diff
   holds no private data (the repo is public). Never leave a commit only in a local clone.
+- Several bots run this code, each on its own machine. After a push (or a change to a bot's
+  config), bring them all to it and restart them: on the maintainer's laptop,
+  `~/.agents/bin/slack-agent-sync`.
 - A running listener keeps its old code until it is restarted. Kill it by PID, in a command of
   its own.
