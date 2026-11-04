@@ -177,8 +177,8 @@ can read also depends on `slack_connector`.
 
 The narrowest setup for one project: a private channel, only the `groups:*` pair of each (no
 `channels:*`, so no public channel can be read or listed), that channel in `channels`, and
-`"slack_connector": false`. Whether code channels are public or private decides if the
-`channels:*` pair is still needed for them; that is untested.
+`"slack_connector": false`. Code channels are private (`is_private`, checked 2026-11-04), so the
+`groups:*` pair covers them too. ("Groups" is Slack's old API name for private channels.)
 
 ## Extensions
 
