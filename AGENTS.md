@@ -13,5 +13,7 @@ Rules for agents changing this repo.
 - Check a change: `python3 -c "import ast; ast.parse(open('slack-agent').read())"`, then
   `SLACK_AGENT_CONFIG=<a config> ./slack-agent --help`. For the listener, restart it (README,
   Running it) and watch its log while you try the change in Slack.
+- Commit to `main` and push it to GitHub without asking, once the checks above pass and the diff
+  holds no private data (the repo is public). Never leave a commit only in a local clone.
 - A running listener keeps its old code until it is restarted. Kill it by PID, in a command of
   its own.
