@@ -1324,7 +1324,7 @@ class Listener:
             set_status(self.web, conv, "active")
             return
         self.sessions[conv].update(workspace=workspace, branch=branch)
-        update_state(conv, workspace=workspace, branch=branch, initiator=user, team=self.team)
+        update_state(conv, workspace=workspace, branch=branch, initiator=user, team=self.team, request_ts=ts)
         if not thread:
             setup_code_channel(self.web, channel, workspace, branch)
         link = self.web.chat_getPermalink(channel=origin, message_ts=ts).get("permalink", f"{origin} {ts}")
@@ -1855,7 +1855,8 @@ def open_channel(web: WebClient, conv: str, title: str) -> str:
     state = read_json(conv_state(conv), {})
     created = web.api_call("agents.conversations.create", json={
         "name": title[:80], "session_id": hashlib.sha1(conv.encode()).hexdigest()[:24],
-        "origin_channel_id": channel, "origin_message_ts": thread})["channel_id"]
+        # Slack adds the author of the origin message: the request, not the thread's parent by someone else.
+        "origin_channel_id": channel, "origin_message_ts": state.get("request_ts") or thread})["channel_id"]
     update_state(conv, moved_to=created)
     write_json(conv_state(created), {k: state[k] for k in ("workspace", "branch", "initiator", "team") if k in state})
     set_status(web, created, "processing")
