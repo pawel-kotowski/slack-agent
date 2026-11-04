@@ -43,5 +43,7 @@
   "t3_instance": "claude",
   "t3_model": "claude-opus-5-5",
   "cleanup_command": null,
+  "slack_connector": true,
+  "channels": null,
   "extensions": []
 }

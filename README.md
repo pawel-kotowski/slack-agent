@@ -42,7 +42,9 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   only an owner can use.
 - **Replies.** The agent posts only through the helpers (`say`, `ask` with buttons, `step` for
   live thinking steps, `finish` with a summary). Nobody reads its terminal. The claude.ai Slack
-  connector, if the agent has it, is for reading only: it posts as the owner.
+  connector, if the agent has it, is for reading only: it posts as the owner. With
+  `"slack_connector": false` the session has no connector and reads Slack with `slack-agent read`,
+  as the bot, in the channels the bot works in (below, [Slack access](#slack-access)).
 - **Approvals.** A Claude Code PreToolUse hook (`slack-agent gate`) stops risky shell commands
   (force push, push to main, deleting a branch, `gh pr merge|close`, `gh release`, `rm -r`,
   `git reset --hard`, …) at Approve/Deny buttons; only an owner's click counts. Pushing the
@@ -159,7 +161,24 @@ One JSON file per bot. `~` is expanded in paths and in the two command lists.
 | `t3_project` | T3 only. The T3 project id of `repo`; when `null`, the project whose folder is `repo`. |
 | `t3_instance`, `t3_model` | T3 only. The provider instance (a Claude instance in T3's settings, which picks the subscription) and model of every task thread. |
 | `cleanup_command` | T3 only. Optional shell command run in a task's workspace before it is removed: the repo's own cleanup (stopping its containers, deleting test accounts). |
+| `slack_connector` | `true` (default): task sessions keep the claude.ai Slack connector of the account, which reads everything the owner can read. `false`: sessions start with a deny rule on it (`mcp__claude_ai_Slack`) and read Slack with `slack-agent read`, as the bot. The screen never has it. |
+| `channels` | Channel IDs the bot works in, or `null` (default) for every channel it is a member of. A tag elsewhere gets a short "not on my list" only the tagger sees, and `slack-agent read` refuses other channels. DMs and the code channels of the bot's own tasks are always allowed. |
 | `extensions` | Python files outside this repo with project-specific additions (below). Any other key in the config is theirs to read. |
+
+## Slack access
+
+What the bot can read is its scopes plus the channels it is a member of; what a task's session
+can read also depends on `slack_connector`.
+
+| Scope | What the bot does with it | Without it |
+|---|---|---|
+| `channels:history`, `groups:history` | Gets every message in its channels (`message.channels`, `message.groups`), not only tags; reads the last messages for the screen, what it missed since it last woke, the first message of a thread it is tagged in, and `slack-agent read`. A bot token reads only channels it is a member of. | Only tags reach it: every reply in a task has to tag the bot, the screen has no context, and `read` fails. |
+| `channels:read`, `groups:read` | `conversations.info`: whether a channel is a code channel Slack's own UI opened (and the request it came from), and whether a preview's channel is private. `channels:read` also lets it list the name and topic of every public channel, member or not. | Code channels the bot opened itself still work (they are in its state). A code channel opened from Slack's own UI is not picked up, and a preview's login is treated as in a public channel. |
+
+The narrowest setup for one project: a private channel, only the `groups:*` pair of each (no
+`channels:*`, so no public channel can be read or listed), that channel in `channels`, and
+`"slack_connector": false`. Whether code channels are public or private decides if the
+`channels:*` pair is still needed for them; that is untested.
 
 ## Extensions
 

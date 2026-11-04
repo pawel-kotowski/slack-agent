@@ -26,6 +26,19 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   with a space it also takes the next words (the prompt) as tool names.
 - **The rules live in the system prompt** (`--append-system-prompt-file`), so they survive
   compaction; the task is the first message.
+- **The Slack connector is a per-bot choice** (2026-11-04, `slack_connector`). It acts as the
+  owner: it reads every channel and DM the owner can, and posts as them. Where that is too wide, a
+  session starts with a deny rule on the connector's server, `mcp__claude_ai_Slack`, in the
+  `--settings` file (Orca) or `.claude/settings.local.json` (T3). Tested with
+  `--dangerously-skip-permissions`: with the rule the session has no Slack tools at all
+  (`ToolSearch` finds none), without it `slack_search_channels` answers. The session then reads
+  Slack with `slack-agent read`, as the bot, which the listener's own digest also points to.
+- **The bot token is the session's real Slack reach, not `channels`.** The helpers (`say`, `read`,
+  `gate`, …) run inside the agent's session and read the bot token from the Keychain or the
+  secrets file themselves, so a session can read the token and call Slack with every scope the bot
+  has. `channels` stops mistakes and a misled agent that uses the helpers; it is not a wall
+  against one that goes around them. A wall needs the session under another OS user or in a
+  container without the token, with Slack reached only through the listener.
 - **Never `--strict-mcp-config` on a session.** It drops the claude.ai connectors too, not only
   local servers (0 Slack tools with it, 27 without). The screen uses it on purpose.
 

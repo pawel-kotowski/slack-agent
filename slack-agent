@@ -20,6 +20,9 @@ Helpers the Claude sessions call:
   slack-agent open-channel <conv> <title>     move a session thread to a new code channel; prints its ID
   slack-agent finish <conv>                   post stdin as the summary; archive the code channel or close the thread
   slack-agent file <conv> <path> [<comment>]  upload a file
+  slack-agent read <conv> [<thread_ts>] [--after <ts>] [--before <ts>] [--limit <n>]
+                                              print a channel's or a thread's messages, oldest first
+                                              (only channels the config's `channels` allows)
   slack-agent preview <channel>               run the task's app with sign-in; its address and login show in Controls
   slack-agent preview-stop <channel>          stop it
 Code channels only:
@@ -86,6 +89,12 @@ DEFAULTS = {
     "t3_instance": None,
     "t3_model": None,
     "cleanup_command": None,
+    # false: task sessions get no claude.ai Slack connector (it reads and posts as the owner) and
+    # read Slack with `slack-agent read`, as the bot.
+    "slack_connector": True,
+    # Channel IDs the bot works in and reads; null = every channel it is a member of. DMs and the
+    # code channels of its own tasks are always allowed.
+    "channels": None,
 }
 
 
@@ -199,6 +208,19 @@ Reply with exactly one line: agent, maybe, other, unrelated: <topic>, or unsafe:
 CLASSIFIER_ARGS = ["-p", "--model", "haiku", "--system-prompt", CLASSIFIER_SYSTEM, "--tools", "",
                    "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands"]
 DIGEST_CHARS = 3000
+CONNECTOR = CONFIG["slack_connector"]
+# The claude.ai Slack connector's tools; a deny rule on the server name covers every one of them.
+CONNECTOR_TOOLS = "mcp__claude_ai_Slack"
+# Tools a task's session never gets: a question tool waits in a terminal nobody watches.
+DENIED_TOOLS = ["AskUserQuestion", *([] if CONNECTOR else [CONNECTOR_TOOLS])]
+
+
+def channel_allowed(channel: str | None) -> bool:
+    """Whether the bot works in and reads this channel: one the config's `channels` lists (all when
+    it lists none), a DM, or a code channel of one of its own tasks."""
+    listed = CONFIG["channels"]
+    return bool(channel) and (not listed or channel in listed or channel.startswith("D")
+                              or conv_state(channel).exists())
 
 
 SECRETS_FILE = HOME / ".config/slack-agent" / f"{CONFIG['keychain_service']}.json"
@@ -396,7 +418,7 @@ def write_agent_files(ws: str, conv: str, system: str) -> None:
     gate_cmd = f"SLACK_AGENT_CONV={shlex.quote(conv)} {ENV} {shlex.quote(str(SELF))} gate"
     settings = {"env": {"SLACK_AGENT_CONV": conv, "SLACK_AGENT_CONFIG": str(CONFIG_PATH)},
                 # Nobody watches the thread: a question tool would wait there unseen.
-                "permissions": {"deny": ["AskUserQuestion"]},
+                "permissions": {"deny": DENIED_TOOLS},
                 "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
                     {"type": "command", "command": gate_cmd, "timeout": APPROVAL_WAIT_S + 60}]}]}}
     write_json(Path(ws) / AGENT_FILES[0], settings)
@@ -749,10 +771,13 @@ def serve_test_ui() -> None:
 TASK = """Task from {who} in Slack:
 {text}
 
-You were woken by that one message ({origin_link}); Slack sends nothing around it. If the task
-refers to earlier messages, a thread, a file or an image, read them with the Slack connector
-(slack_read_thread / slack_read_channel / slack_read_file on channel {origin} at {ts}).
+You were woken by that one message ({origin_link}); Slack sends nothing around it. {read}
 """
+TASK_READ = """If the task
+refers to earlier messages, a thread, a file or an image, read them with the Slack connector
+(slack_read_thread / slack_read_channel / slack_read_file on channel {origin} at {ts}).""" if CONNECTOR else """If the task
+refers to earlier messages or a thread, read them: `slack-agent read {origin} --before {ts}` (the
+channel before it) or `slack-agent read {origin} <thread_ts>` (a thread)."""
 
 SYSTEM = """You are {bot}, {owner}'s Claude Code agent, started from Slack.
 These rules hold for the whole session, also after the conversation is compacted.
@@ -764,7 +789,7 @@ How to work:
 - Write every Slack message in the language of the task message, and answer each later message
   in its own language.
 - Slack does not see your own text output, and nobody reads it. Reply only through the helper, markdown
-  on stdin (the Slack connector posts as {owner}, so never use it to post). After the helper call, end
+  on stdin{connector_note}. After the helper call, end
   the turn with the one word "sent": do not repeat or sum up in your output what you posted.
   slack-agent say <conv> <<'EOF'
   ...
@@ -782,7 +807,7 @@ How to work:
   answer is one of a few choices, give them as buttons: `slack-agent ask <conv> "Option A" "Option B"`;
   a click comes back as `[slack] <name> chose "Option A" in answer to your question "..."`, and people
   can still type. Never ask in your own output: nobody watches it, and an answer only comes from Slack.
-- New Slack messages arrive here as lines that start with "[slack] <name>:"; that message is for
+{read_line}- New Slack messages arrive here as lines that start with "[slack] <name>:"; that message is for
   you. When others talked before it, the line ends with "[context only, said before it and not to
   you: ...]": read it, do not act on it. A line that starts "[slack] <name> (maybe not to you):" is
   a request the screen could not place: it may be for a person. Take it when the conversation
@@ -827,9 +852,19 @@ PREVIEW_LINE = """  - preview: `slack-agent preview <channel>` runs the app from
     where to find it.
 """
 
+READ_LINE = """- You have no Slack connector. Read Slack with `slack-agent read <conv or channel> [<thread_ts>]
+  [--after <ts>] [--before <ts>] [--limit <n>]`: messages oldest first, each with its ts, and a
+  thread's ts and reply count. It reads the channels this bot works in. Files and images people
+  posted cannot be opened: ask for what you need as text.
+"""
+
+
 def system_prompt(**fields: str) -> str:
     notes = CONFIG["project_notes"].strip()
     return SYSTEM.format(**fields, bot=CONFIG["bot_name"], owner=OWNER, self=SELF,
+                         connector_note=(" (the Slack connector posts as {owner}, so never use it to post)".format(owner=OWNER)
+                                         if CONNECTOR else ""),
+                         read_line="" if CONNECTOR else READ_LINE,
                          notes=" " + notes.format(owner=OWNER) if notes else "",
                          preview=PREVIEW_LINE.format(preview_where="in the channel's Controls tab" if CONFIG["test_ui"]
                                                      else "in a message the helper posts")
@@ -930,6 +965,16 @@ class Listener:
         conv = self.conv_of(channel, event.get("thread_ts"))
         is_dm = event.get("channel_type") == "im"
         code = None if conv or is_dm else self.code_channel(channel)
+        origin = ((code or {}).get("origin_link") or {}).get("channel_id")
+        if not conv and not is_dm and not channel_allowed(channel) and not channel_allowed(origin):
+            if kind == "app_mention":  # a tag elsewhere: say where the bot works, to the tagger only
+                log("ignored: not in channels", channel)
+                try:
+                    self.web.chat_postEphemeral(channel=channel, user=user, thread_ts=event.get("thread_ts"),
+                                                text="I don't work in this channel: it is not on my list.")
+                except SlackApiError:
+                    pass
+            return
         if not conv and not is_dm and code is None and kind != "app_mention":
             # A channel message outside any task. A mention in it comes again as app_mention, often
             # after this event, so this one must not mark the message seen.
@@ -1120,7 +1165,8 @@ class Listener:
                  f"a session thread under the request (channel {channel}, thread {thread})")
         system = system_prompt(conv=conv, where=where, decide=DECIDE.format(conv=conv) if thread else "",
                                workspace=workspace, branch=branch)
-        task = TASK.format(who=self.display(user), text=text, origin_link=link, origin=origin, ts=ts)
+        task = TASK.format(who=self.display(user), text=text, origin_link=link,
+                           read=TASK_READ.format(origin=origin, ts=ts))
         self.sessions[conv]["seen"] = ts
         self.sessions[conv][HANDLE] = self.launch(conv, system, task)
         del self.sessions[conv]["starting"]
@@ -1157,7 +1203,7 @@ class Listener:
         system_file, prompt_file = STATE_DIR / f"{conv}.system.md", STATE_DIR / f"{conv}.prompt.md"
         system_file.write_text(system)
         prompt_file.write_text(task)
-        hook = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+        hook = {"permissions": {"deny": DENIED_TOOLS}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
             {"type": "command", "command": f"{ENV} {shlex.quote(str(SELF))} gate", "timeout": APPROVAL_WAIT_S + 60}]}]}}
         settings = STATE_DIR / "claude-settings.json"
         write_json(settings, hook)
@@ -1285,8 +1331,9 @@ class Listener:
             if missed:
                 lines = "; ".join(f"{self.display(m.get('user'))}: {m.get('text', '')}" for m in missed).replace("\n", " ")
                 if len(lines) > DIGEST_CHARS:
-                    lines = (f"{len(missed)} messages; read them with slack_read_channel / slack_read_thread "
-                             f"after {s['seen']}")
+                    how = (f"slack_read_channel / slack_read_thread after {s['seen']}" if CONNECTOR else
+                           f"`slack-agent read {conv} --after {s['seen']}" + (f" --before {ts}`" if ts else "`"))
+                    lines = f"{len(missed)} messages; read them with {how}"
                 digest = f" ⏎ ⏎ [context only, said before it and not to you: {lines}]"
         if ts:
             s["seen"] = ts
@@ -1315,9 +1362,11 @@ class Listener:
         # The Claude tab (or the T3 thread) is gone: start a new session that carries the message.
         system = system_prompt(conv=conv, where="the same conversation as before", decide="",
                                workspace=s["workspace"], branch=s["branch"])
-        task = TASK.format(who=self.display(user), origin_link=f'{s["origin"]} {s["ts"]}', origin=s["origin"],
-                           ts=s["ts"], text=text + "\n\n(The earlier Claude session of this conversation ended; "
-                                                  "read its history with the Slack connector if you need it.)")
+        how = "the Slack connector" if CONNECTOR else f"`slack-agent read {conv}`"
+        task = TASK.format(who=self.display(user), origin_link=f'{s["origin"]} {s["ts"]}',
+                           read=TASK_READ.format(origin=s["origin"], ts=s["ts"]),
+                           text=text + f"\n\n(The earlier Claude session of this conversation ended; "
+                                       f"read its history with {how} if you need it.)")
         if T3 and handle:
             t3("t3_thread_organize", {"threadId": handle, "action": "archive"})
         s[HANDLE] = self.launch(conv, system, task)
@@ -1673,6 +1722,53 @@ def branch_pr(ws: str) -> dict | None:
     return {"number": pr["number"], "url": pr["url"]} if pr and pr["state"] == "OPEN" else None
 
 
+def read(web: WebClient, args: list[str], channel: str, thread: str | None) -> None:
+    """Print a channel's (or a thread's) messages, oldest first, as the bot sees them."""
+    opts, it = {"limit": "50"}, iter(args)
+    for arg in it:
+        if arg in ("--after", "--before", "--limit"):
+            opts[arg[2:]] = next(it, "")
+        elif not thread and re.fullmatch(r"\d+\.\d+", arg):
+            thread = arg
+        else:
+            sys.exit(f"slack-agent read: unknown argument {arg!r}")
+    if not channel_allowed(channel):
+        sys.exit(f"slack-agent read: {channel} is not a channel this bot works in (the config's `channels`)")
+    query = {"channel": channel, "limit": max(1, min(int(opts["limit"] or 50), 200))}
+    if opts.get("after"):
+        query["oldest"] = opts["after"]
+    if opts.get("before"):
+        query["latest"] = opts["before"]
+    try:
+        data = web.conversations_replies(ts=thread, **query) if thread else web.conversations_history(**query)
+    except SlackApiError as exc:
+        sys.exit(f"slack-agent read: Slack said {exc.response.get('error')}")
+    names: dict[str, str] = {}
+
+    def name(user: str | None, bot: str | None = None) -> str:
+        if bot or not user:
+            return CONFIG["bot_name"] if bot else "?"
+        if user not in names:
+            try:
+                p = web.users_info(user=user)["user"]
+                names[user] = CONFIG["owners"].get(user) or p.get("real_name") or p.get("name") or user
+            except SlackApiError:
+                names[user] = user
+        return names[user]
+
+    edge = {opts.get("after"), opts.get("before")} - {None, ""}
+    msgs = sorted((m for m in data.get("messages", []) if m.get("ts") not in edge), key=lambda m: float(m["ts"]))
+    for m in msgs:
+        text = re.sub(r"<@(U[A-Z0-9]+)(?:\|[^>]*)?>", lambda g: "@" + name(g.group(1)), m.get("text", ""))
+        files = "".join(f" [file: {f.get('name') or f.get('title') or f.get('id')}]" for f in m.get("files", []))
+        replies = (f" [thread {m['ts']}, {m['reply_count']} replies]"
+                   if m.get("reply_count") and not thread else "")
+        print(f"{m['ts']} {name(m.get('user'), m.get('bot_id'))}: {text}{files}{replies}")
+    if data.get("has_more") and msgs:
+        # A thread comes oldest first, so the rest is newer; a channel newest first, so the rest is older.
+        print(f"(more: --after {msgs[-1]['ts']})" if thread else f"(more, older: --before {msgs[0]['ts']})")
+
+
 def gate() -> None:
     """PreToolUse hook: a risky shell command waits for an owner's Approve click."""
     event = json.loads(sys.stdin.read() or "{}")
@@ -1763,6 +1859,8 @@ def main(argv: list[str]) -> None:
             preview_restore(web, channel)
     elif cmd == "test-ui" and len(rest) == 1:
         publish_test_ui(web, channel)
+    elif cmd == "read" and rest:
+        read(web, rest[1:], channel, thread)
     elif cmd == "file" and len(rest) in (2, 3):
         print(web.files_upload_v2(channel=channel, thread_ts=thread, file=rest[1],
                                   initial_comment=rest[2] if len(rest) == 3 else None).data.get("ok"))
