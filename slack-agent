@@ -28,6 +28,9 @@ Helpers the Claude sessions call:
 Code channels only:
   slack-agent bar <channel> <key> <label> [<url>] [<icon>]   add or change a context bar item
   slack-agent bar <channel> --remove <key>    remove a context bar item
+  slack-agent link <channel> <label> <url> [<note>]   a link people open (a deployment, a page), shown in Controls;
+                                              <note> is mrkdwn under it (e.g. the login)
+  slack-agent link <channel> --remove <label> remove it
   slack-agent diff <channel> [<base>]         show `git diff <base>` of the cwd as the Code tab
   slack-agent html <channel> <file.html> [<tab name>]   a rendered HTML page as a tab
   slack-agent canvas <channel> <file.md> [<title>]      a Markdown canvas as a tab
@@ -733,6 +736,10 @@ def publish_controls(web: WebClient, channel: str) -> None:
                   {"type": "mrkdwn", "text": f"*Password*\n`{preview['password']}`" if preview.get("private")
                    else "*Password*\nrun `/preview-login`"}]},
               {"type": "divider"}] if preview else [])
+    for item in state.get("links", []):
+        login.append({"type": "section", "text": {"type": "mrkdwn", "text":
+                      f"*{item['label']}*\n<{item['url']}>" + (f"\n{item['note']}" if item.get("note") else "")}})
+        login.append({"type": "divider"})
     if not preview and state.get("preview_displaced_by"):
         at = time.strftime("%H:%M", time.localtime(state.get("preview_displaced_at") or time.time()))
         login = [{"type": "section", "text": {"type": "mrkdwn", "text":
@@ -966,6 +973,10 @@ How to work:
   - pages, canvases and files: `slack-agent html|canvas|file <channel> ...` (keep such files in /tmp);
     `slack-agent tab <channel> --remove <name>` removes a tab you added (and its canvas); never
     delete a tab's canvas or file yourself: a tab whose file is gone stays empty and cannot be removed
+  - links: whatever people open that is not the preview (a deployment or service you started, a
+    dashboard, a page you host) goes in the Controls tab with `slack-agent link <channel> "<label>"
+    <url> ["<note>"]`, the login in the note; also when you give the link in a message. Keep it
+    current (`--remove <label>` when it stops)
   - if the focus of the task changes: `slack-agent rename <conv> "<new title>"`
 {preview}"""
 PREVIEW_LINE = """  - preview: `slack-agent preview <channel>` runs the app from your workspace's checkout with
@@ -1961,7 +1972,7 @@ def main(argv: list[str]) -> None:
     conv = rest[0] if rest else ""
     channel, thread = split(conv)
     state = read_json(conv_state(conv), {}) if conv else {}
-    if cmd in {"bar", "diff", "html", "canvas", "plan", "comments"} and thread:
+    if cmd in {"bar", "link", "diff", "html", "canvas", "plan", "comments"} and thread:
         sys.exit(f"`{cmd}` works in a code channel only; run `slack-agent open-channel {conv} <title>` first")
     if (cmd == "say" and len(rest) == 1) or (cmd == "ask" and 1 <= len(rest) <= 11):
         if cmd == "ask":
@@ -2032,6 +2043,13 @@ def main(argv: list[str]) -> None:
             at = next((n for n, i in enumerate(items) if i.get("item_type") == "action"), len(items))
             items.insert(at, item)
         set_bar(web, channel, items)
+    elif cmd == "link" and len(rest) >= 3:
+        label = rest[2] if rest[1] == "--remove" else rest[1]
+        links = [i for i in state.get("links", []) if i["label"] != label]
+        if rest[1] != "--remove":
+            links.append({"label": label, "url": rest[2], **({"note": rest[3]} if len(rest) > 3 else {})})
+        update_state(channel, links=links)
+        publish_controls(web, channel)
     elif cmd == "diff" and len(rest) in (1, 2):
         show_diff(web, channel, ".", rest[1] if len(rest) == 2 else "origin/main")
     elif cmd == "tab" and len(rest) == 3 and rest[1] == "--remove":

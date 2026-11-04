@@ -164,6 +164,9 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   channel started a preview, with nothing saying why). The displaced channel's Controls says who
   took the address, and its preview starts again when that one stops (the task ends, or
   `preview-stop`).
+- Every link people open goes in Controls, not only the preview's (2026-11-04: an agent set up an
+  always-on deployment and gave its link and login only in messages; the owner: "always link in
+  controls"). `slack-agent link` adds one; the system prompt tells the agent to use it.
 
 ## T3 Code backend
 

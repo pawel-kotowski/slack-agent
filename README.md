@@ -63,6 +63,8 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   shows the address and a one-off login in the Controls tab (posts them when `test_ui` is off). The
   agent starts one itself for any change people can run or see. It stops, and the database is dropped, when the task
   ends.
+- **Links.** `slack-agent link` puts any other link people open (a deployment the agent started,
+  a page it hosts) in the Controls tab, with an optional note such as the login.
 - **Finish.** `/done`, the Finish button or the agent's `finish` posts a summary with feedback
   buttons and archives the code channel. The workspace is removed when its branch has nothing
   unpushed; otherwise the bot says where it kept it.
