@@ -51,6 +51,13 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   has. `channels` stops mistakes and a misled agent that uses the helpers; it is not a wall
   against one that goes around them. A wall needs the session under another OS user or in a
   container without the token, with Slack reached only through the listener.
+- **A new Orca worktree's own shells are closed before the task starts** (2026-11-04,
+  `close_seeded_terminals`). Orca opens the repo's `orca.yaml` `defaultTabs` (or one plain shell
+  when it has none) in every new worktree, also with `--setup skip`, where their commands do not
+  run; Orca reopens open tabs after a restart. They appear within about 0.2 s of `worktree create`
+  returning (it does not wait for them), so the listener polls `terminal list` and then closes
+  them all with `terminal close --worktree … --all`. A setup script that closes its own tab cannot
+  do it: setup is skipped.
 - **Never `--strict-mcp-config` on a session.** It drops the claude.ai connectors too, not only
   local servers (0 Slack tools with it, 27 without). The screen uses it on purpose.
 

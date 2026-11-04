@@ -462,6 +462,22 @@ def orca(*args: str) -> dict:
         return {"ok": False, "error": (out.stdout + out.stderr).strip()[:500]}
 
 
+def close_seeded_terminals(path: str) -> None:
+    """Close the shells Orca opens in a new worktree, before the task's own terminal starts.
+
+    Orca makes the repo's `orca.yaml` `defaultTabs` (or one plain shell when it has none) for every
+    new worktree, also with `--setup skip`, where their commands do not run: idle shells nobody
+    uses. `worktree create` returns before they exist, so wait for them (a few seconds at most).
+    """
+    for _ in range(20):
+        terminals = (orca("terminal", "list", "--worktree", f"path:{path}").get("result") or {}).get("terminals")
+        if terminals:
+            time.sleep(1)  # the tabs are made one after another
+            orca("terminal", "close", "--worktree", f"path:{path}", "--all")
+            return
+        time.sleep(0.25)
+
+
 # --- the T3 Code backend ---------------------------------------------------------------------
 # T3 runs each task as a thread in its own worktree; `t3_tool` calls one of its MCP tools and prints
 # the result as JSON (on an error: exit 1, the error on stderr).
@@ -1348,6 +1364,7 @@ class Listener:
             log("workspace failed", conv, res)
             post(self.web, conv, f"Could not make a workspace: {res.get('error')}")
             return None, None
+        close_seeded_terminals(wt["path"])
         return wt["path"], wt.get("branch", "").removeprefix("refs/heads/")
 
     def launch(self, conv: str, system: str, task: str) -> str | None:
