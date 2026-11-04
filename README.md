@@ -24,7 +24,7 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
 
 - **Listener.** `slack-agent listen` keeps a Socket Mode connection to Slack. A DM or a tag from
   an owner starts a task: it reacts 👀, makes an Orca workspace (a child worktree of the
-  listener's own workspace, on its own branch from `origin/main`) and starts the agent in a
+  listener's own workspace, on its own branch from origin's default branch) and starts the agent in a
   terminal there. The task text is the agent's first message; the Slack rules go in its system
   prompt, so they survive compaction. A tag with no words means "take this thread": the task is
   the thread's first message.
@@ -46,13 +46,13 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   `"slack_connector": false` the session has no connector and reads Slack with `slack-agent read`,
   as the bot, in the channels the bot works in (below, [Slack access](#slack-access)).
 - **Approvals.** A Claude Code PreToolUse hook (`slack-agent gate`) stops risky shell commands
-  (a plain force push, push to main, deleting a remote branch, merging or closing a pull request
+  (a plain force push, push to main or the default branch, deleting a remote branch, merging or closing a pull request
   with `gh pr` or `gh api`, `gh release`, `gh repo delete`, `rm -r`/`rm -f` outside the task's
   workspace and the temp directory, `git reset --hard`, `git clean -f`, `git checkout --`) at
   Approve/Deny buttons; only an owner's click counts. The message names what is risky, shows the
   agent's reason (the Bash tool's description) and the whole command. "Approve all like this in
   this task" also lets later steps of the same kinds through in that task. Pushing branches other
-  than main (with `--force-with-lease` too), opening pull requests, deleting local branches and
+  than main and the default branch (with `--force-with-lease` too), opening pull requests, deleting local branches and
   deleting files in the workspace need no approval. The gate splits the command into simple
   commands first, so text in a heredoc or a quoted argument does not count.
 - **Watcher.** Every 10 s the listener compares each code channel's workspace diff with its Code
@@ -237,7 +237,7 @@ different `ui_origin` ports and PostgreSQL containers.
 With `"backend": "t3"`, the listener runs each task as a T3 Code thread, through T3's MCP tools
 (`t3_tool` calls them), instead of Orca:
 
-- **A task** is a thread in a new worktree from the newest `origin/main` (branch named after the
+- **A task** is a thread in a new worktree from the newest default branch on origin (`origin/HEAD`, which each task refreshes; branch named after the
   task), on `t3_instance` and `t3_model`, at full access. The listener makes it idle, writes the
   agent's files into the worktree, then sends the task as the first message.
 - **The agent's setup** comes from two files in its worktree, because T3 gives the agent no
