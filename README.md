@@ -46,9 +46,15 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   `"slack_connector": false` the session has no connector and reads Slack with `slack-agent read`,
   as the bot, in the channels the bot works in (below, [Slack access](#slack-access)).
 - **Approvals.** A Claude Code PreToolUse hook (`slack-agent gate`) stops risky shell commands
-  (force push, push to main, deleting a branch, `gh pr merge|close`, `gh release`, `rm -r`,
-  `git reset --hard`, …) at Approve/Deny buttons; only an owner's click counts. Pushing the
-  task's own branch and opening a pull request need no approval.
+  (a plain force push, push to main, deleting a remote branch, merging or closing a pull request
+  with `gh pr` or `gh api`, `gh release`, `gh repo delete`, `rm -r`/`rm -f` outside the task's
+  workspace and the temp directory, `git reset --hard`, `git clean -f`, `git checkout --`) at
+  Approve/Deny buttons; only an owner's click counts. The message names what is risky, shows the
+  agent's reason (the Bash tool's description) and the whole command. "Approve all like this in
+  this task" also lets later steps of the same kinds through in that task. Pushing branches other
+  than main (with `--force-with-lease` too), opening pull requests, deleting local branches and
+  deleting files in the workspace need no approval. The gate splits the command into simple
+  commands first, so text in a heredoc or a quoted argument does not count.
 - **Watcher.** Every 10 s the listener compares each code channel's workspace diff with its Code
   tab and updates it, and asks GitHub for the branch's open PR. This does not depend on the agent,
   so another agent CLI gets it too. Only the approval gate is Claude-specific.

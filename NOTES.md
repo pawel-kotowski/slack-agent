@@ -24,6 +24,18 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   "<name> chose A" and reaches the agent as `[slack] <name> chose "A" in answer to your question
   "…"`, the question included, so the answer is clear many turns later. Write the flag with `=`:
   with a space it also takes the next words (the prompt) as tool names.
+- **The gate asks only for what cannot be undone** (2026-11-04). In its first week one bot asked
+  17 times and the owner approved 15. Only 4 asks were real: PR merges and closes. The rest were
+  `--force-with-lease` pushes while rebasing the owner's PR stack, `rm -rf` on build output or
+  `/tmp`, `git branch -D` on local temporary branches, and text in heredocs (a doc being written
+  that mentioned `git reset --hard` or `gh pr merge`). Also, the message cut the command at 500
+  characters, so the part that set off the gate was often out of sight, and the stack's real merge
+  went through `gh api …/merge-async`, which a regex on `gh pr merge` never saw. So the gate splits
+  the command into simple commands with `shlex` (heredoc bodies dropped, quoted words kept whole,
+  `bash -c`/`eval`/`$(…)` looked into, `cd` followed for `rm` paths), names what is risky, shows
+  the agent's Bash description as the reason, offers "Approve all like this in this task"
+  (`approved_kinds` in the conversation's state), and gates PR merges and closes and DELETE calls
+  through `gh api` too.
 - **The rules live in the system prompt** (`--append-system-prompt-file`), so they survive
   compaction; the task is the first message.
 - **The Slack connector is a per-bot choice** (2026-11-04, `slack_connector`). It acts as the

@@ -145,12 +145,6 @@ COMMANDS = [
     {"name": "preview-login", "description": "Show me the preview's login (only I see it)"},
 ]
 COMMANDS = [c for c in COMMANDS if CONFIG["preview"] or not c["name"].startswith("preview")]
-# Shell commands that wait for an owner's Approve click (the PreToolUse hook). Pushing the
-# task's own branch and opening a pull request need none; force, main, deletes, merges, closes
-# and releases do.
-RISKY = re.compile(r"\bgit\s+push\b[^;&|]*(\s(-f|--force\S*|--delete|-d)\b|\s\S*:\S*|\b(main|master)\b)"
-                   r"|\bgh\s+(pr\s+(merge|close)|release|repo\s+delete)\b"
-                   r"|\brm\s+-\w*[rf]|\bgit\s+(reset\s+--hard|clean\s+-\w*f|branch\s+-D|checkout\s+--\s)")
 STATE_DIR = Path(CONFIG.get("state_dir") or HOME / ".local/state/slack-agent" / CONFIG_PATH.stem)
 SESSIONS = STATE_DIR / "sessions.json"
 APPROVALS = STATE_DIR / "approvals"
@@ -281,6 +275,135 @@ def update_state(conv: str, **values) -> dict:
     state.update(values)
     write_json(conv_state(conv), state)
     return state
+
+
+# Shell commands that wait for an owner's Approve click (the PreToolUse hook). The command is
+# split into simple commands (heredoc bodies dropped, quotes kept as one word), so text that only
+# mentions a command, in a heredoc or a commit message, is not run and does not count. Pushing any
+# branch but main (also with --force-with-lease), opening a pull request, deleting local branches
+# and removing files inside the task's workspace or the temp directory need no approval.
+MAIN_BRANCHES = {"main", "master"}
+SHELLS = {"bash", "sh", "zsh", "dash"}
+PREFIXES = {"sudo", "command", "time", "nohup", "exec", "env", "builtin", "xargs"}
+SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n", "|&", ";;"}
+
+
+def _drop_heredocs(command: str) -> str:
+    out, pos = [], 0
+    for m in re.finditer(r"<<-?\s*(['\"]?)([A-Za-z_][\w.-]*)\1", command):
+        if m.start() < pos:
+            continue
+        line_end = command.find("\n", m.end())
+        if line_end < 0:
+            break
+        end = re.compile(rf"^[ \t]*{re.escape(m.group(2))}[ \t]*$", re.M).search(command, line_end + 1)
+        out.append(command[pos:line_end + 1])
+        pos = end.end() if end else len(command)
+    return "".join(out) + command[pos:]
+
+
+def _simple_commands(command: str) -> list[list[str]]:
+    lex = shlex.shlex(_drop_heredocs(command).replace("$(", "( ").replace("`", " ; "),
+                      posix=True, punctuation_chars=";&|()\n")
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    lex.commenters = ""
+    words, out = [], []
+    try:
+        for token in lex:
+            if token in SEPARATORS or set(token) <= set(";&|()\n"):
+                out.append(words)
+                words = []
+            elif token.startswith("#") and not words:
+                lex.instream.readline()  # a comment runs to the end of its line
+                out.append(words)
+            else:
+                words.append(token)
+    except ValueError:  # an unclosed quote: judge the words read so far
+        pass
+    out.append(words)
+    return [w for w in out if w]
+
+
+def _inside(path: str, roots: list[str]) -> bool:
+    real = os.path.realpath(path)
+    return any(real != root and real.startswith(root.rstrip("/") + "/") for root in roots)
+
+
+def risky(command: str, cwd: str, workspace: str | None) -> list[tuple[str, str]]:
+    """The steps in `command` that need an owner's approval, as (kind, detail); empty: none."""
+    roots = [os.path.realpath(p) for p in
+             filter(None, [workspace, "/tmp", "/private/tmp", "/var/tmp", os.environ.get("TMPDIR")])]
+    found: list[tuple[str, str]] = []
+    for words in _simple_commands(command):
+        while words and (re.fullmatch(r"\w+=.*", words[0]) or words[0] in PREFIXES):
+            words = words[1:]
+        if not words:
+            continue
+        prog, args = os.path.basename(words[0]), words[1:]
+        if prog in SHELLS and "-c" in args[:-1]:
+            found += risky(args[args.index("-c") + 1], cwd, workspace)
+        elif prog == "eval":
+            found += risky(" ".join(args), cwd, workspace)
+        elif prog == "cd" and args:
+            cwd = os.path.join(cwd, os.path.expanduser(args[0]))
+        elif prog == "git":
+            while args and args[0].startswith("-"):  # git's own options: -C <dir>, -c <k=v>, ...
+                if args[0] == "-C" and len(args) > 1:
+                    cwd = os.path.join(cwd, os.path.expanduser(args[1]))
+                args = args[2:] if args[0] in ("-C", "-c") else args[1:]
+            sub, rest = (args[0], args[1:]) if args else ("", [])
+            flags = [a for a in rest if a.startswith("-")]
+            short = "".join(a[1:] for a in flags if not a.startswith("--"))
+            if sub == "push":
+                refs = [a for a in rest if not a.startswith("-")][1:]
+                if "--force" in flags or "f" in short or any(r.startswith("+") for r in refs):
+                    found.append(("force push", " ".join(refs)))
+                if {"--delete", "--mirror", "--prune"} & set(flags) or "d" in short \
+                        or any(r.startswith(":") for r in refs):
+                    found.append(("delete a remote branch", " ".join(refs)))
+                for ref in refs:
+                    dest = ref.lstrip("+").rpartition(":")[2].removeprefix("refs/heads/")
+                    if dest in MAIN_BRANCHES:
+                        found.append(("push to main", ref))
+            elif sub == "reset" and "--hard" in flags:
+                found.append(("git reset --hard", "drops uncommitted work"))
+            elif sub == "clean" and ("--force" in flags or "f" in short):
+                found.append(("git clean -f", "deletes untracked files"))
+            elif sub == "checkout" and "--" in rest:
+                found.append(("git checkout --", "drops uncommitted changes"))
+        elif prog == "gh" and args and args[0] == "api":
+            method = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-X", "--method")),
+                          next((a.split("=", 1)[1] for a in args if a.startswith("--method=")), "GET"))
+            valued = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header", "--input",
+                      "-q", "--jq", "-t", "--template", "--hostname", "--cache", "-p", "--preview"}
+            path = next((a for prev, a in zip(args, args[1:]) if not a.startswith("-") and prev not in valued), "")
+            writes = method.upper() != "GET" or any(a in ("-f", "-F", "--field", "--raw-field") for a in args)
+            if writes and re.search(r"/pulls/\d+/merge", path) or re.search(r"\b(merge|close)PullRequest\b", " ".join(args)):
+                found.append(("merge or close a pull request through gh api", path))
+            elif method.upper() == "DELETE":
+                found.append(("gh api DELETE", path))
+        elif prog == "gh" and args:
+            pair = " ".join(args[:2])
+            if pair in ("pr merge", "pr close", "repo delete") \
+                    or (args[0] == "release" and pair not in ("release view", "release list", "release download")):
+                target = " ".join(a for a in args[2:3] if not a.startswith("-"))
+                found.append((f"gh {pair}", target))
+        elif prog == "rm":
+            opts = [a for a in args if a.startswith("-") and a != "-"]
+            if not ({"--recursive", "--force"} & set(opts) or any(set(a[1:]) & set("rRf") for a in opts
+                                                                       if not a.startswith("--"))):
+                continue
+            paths = args[args.index("--") + 1:] if "--" in args else [a for a in args if not a.startswith("-")]
+            outside = []
+            for p in paths:
+                p = os.path.expandvars(os.path.expanduser(p))
+                stem = re.split(r"[*?\[{]", p)[0]  # a glob: judge the directory it starts in
+                if "$" in stem or not _inside(os.path.join(cwd, stem or "."), roots):
+                    outside.append(p)
+            if outside or not paths:
+                found.append(("delete outside the workspace", " ".join(outside) or "paths from stdin"))
+    return found
 
 
 def set_status(web: WebClient, conv: str, status: str, title: str | None = None) -> None:
@@ -814,12 +937,16 @@ How to work:
   shows it is for you. When you are not sure, do not act on it: say in one line that you did not
   take it, and ask with buttons, e.g. `slack-agent ask <conv> "Yes, take it" "No"`. Whenever you
   leave a request undone that someone may expect you to do, say so in the channel.
-  People may ask you things and you act on their requests. You may push your task's branch and
-  open a pull request for it without asking (`git push -u origin HEAD`, `gh pr create`). Other
-  risky steps need {owner}'s approval. Risky shell commands (force push, push to main, deleting a
-  branch, gh pr merge/close, gh release, rm -r, git reset --hard, ...) stop at Approve/Deny
-  buttons on their own: just run the command, alone, and never wrap it in `slack-agent approve`. For a risky step that is not one of those commands (touching anything
-  outside your workspace, changing something people share), run
+  People may ask you things and you act on their requests. You may push branches other than main
+  (also with `--force-with-lease`) and open pull requests without asking, delete local branches,
+  and delete files inside your workspace or the temp directory. Other risky steps need {owner}'s
+  approval. Risky shell commands (a plain force push, pushing to main, deleting a remote branch,
+  merging or closing a pull request (gh or gh api), gh release, deleting files elsewhere, git
+  reset --hard, git clean -f, ...) stop at Approve/Deny buttons on their own: just run the
+  command, alone, and never wrap it in `slack-agent approve`. {owner} sees the Bash tool's
+  description with the command: say there what it does and why, and when {owner} already chose
+  this step (a button or a message), say so. For a risky step that is not one of those commands
+  (touching anything outside your workspace, changing something people share), run
   `slack-agent approve <conv> "<what and why>"` first; it exits 0 only when {owner} approved.
 - Slash commands in a code channel arrive as "[slack] <name> ran /<command> <text>": /done =
   finish (from {owner} only), /pr = push the branch and open a pull request,
@@ -1058,17 +1185,23 @@ class Listener:
         reply_url = payload.get("response_url")
         for act in payload.get("actions") or []:
             action_id, value = act.get("action_id", ""), act.get("value", "")
-            if action_id in ("approve", "deny"):
+            if action_id in ("approve", "approve_all", "deny"):
                 if not self.owner(user):
                     respond(reply_url, {"response_type": "ephemeral", "replace_original": False,
                                         "text": f"Only {OWNER} can approve this."})
                     continue
-                approved = action_id == "approve"
-                write_json(APPROVALS / f"{value}.json", {"approved": approved, "by": self.display(user)})
-                what = read_json(APPROVALS / f"{value}.ask.json", {}).get("what", "the step")
+                approved = action_id != "deny"
+                write_json(APPROVALS / f"{value}.json", {"approved": approved, "by": self.display(user),
+                                                         "all": action_id == "approve_all"})
+                ask = read_json(APPROVALS / f"{value}.ask.json", {})
+                what, after = ask.get("what", "the step"), ""
+                if action_id == "approve_all" and ask.get("conv") and ask.get("kinds"):
+                    kinds = read_json(conv_state(ask["conv"]), {}).get("approved_kinds") or []
+                    update_state(ask["conv"], approved_kinds=sorted(set(kinds) | set(ask["kinds"])))
+                    after = f"\nFrom now on in this task, without asking: {', '.join(ask['kinds'])}."
                 respond(reply_url, {"replace_original": True,
-                                    "text": f"{'Approved' if approved else 'Denied'} by {self.display(user)}: {what}"})
-                log("approval", value, approved, self.display(user))
+                                    "text": f"{'Approved' if approved else 'Denied'} by {self.display(user)}: {what}{after}"})
+                log("approval", value, action_id, self.display(user))
             elif action_id in ("hold_pass", "hold_drop"):
                 held = read_json(APPROVALS / f"{value}.hold.json", None)
                 if not self.owner(user) or not held:
@@ -1601,17 +1734,28 @@ def ask_blocks(conv: str, question: str, options: list[str]) -> list[dict]:
                  "value": json.dumps({"conv": conv, "option": option[:1500]})} for i, option in enumerate(options)]}]
 
 
-def approve(web: WebClient, conv: str, what: str) -> bool:
+def approve(web: WebClient, conv: str, what: str, why: str | None = None, command: str | None = None,
+            kinds: list[str] | None = None) -> bool:
+    """Ask an owner with Approve/Deny buttons; True once one approves. With `kinds` (a gated
+    command's kinds of step) a third button approves it and every later step of those kinds in
+    this task."""
     ask_id = uuid.uuid4().hex[:12]
-    write_json(APPROVALS / f"{ask_id}.ask.json", {"conv": conv, "what": what})
-    blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Approval needed ({OWNER}):* {what[:2800]}"}},
-        {"type": "actions", "elements": [
-            {"type": "button", "text": {"type": "plain_text", "text": "Approve"}, "style": "primary",
-             "action_id": "approve", "value": ask_id},
-            {"type": "button", "text": {"type": "plain_text", "text": "Deny"}, "style": "danger",
-             "action_id": "deny", "value": ask_id}]},
-    ]
+    write_json(APPROVALS / f"{ask_id}.ask.json", {"conv": conv, "what": what, "kinds": kinds or []})
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*Approval needed ({OWNER}):* {what[:2800]}"}}]
+    if why:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"Why: {why[:2900]}"}]})
+    if command:
+        shown = command if len(command) <= 2800 else command[:2800] + f"\n… ({len(command) - 2800} more characters)"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                                                   "text": "```" + shown.replace("```", "`\u200b``") + "```"}})
+    buttons = [{"type": "button", "text": {"type": "plain_text", "text": "Approve"}, "style": "primary",
+                "action_id": "approve", "value": ask_id}]
+    if kinds:
+        buttons.append({"type": "button", "text": {"type": "plain_text", "text": "Approve all like this in this task"},
+                        "action_id": "approve_all", "value": ask_id})
+    buttons.append({"type": "button", "text": {"type": "plain_text", "text": "Deny"}, "style": "danger",
+                    "action_id": "deny", "value": ask_id})
+    blocks.append({"type": "actions", "elements": buttons})
     post(web, conv, f"Approval needed: {what}", blocks=blocks)
     set_status(web, conv, "suspended")
     deadline = time.time() + APPROVAL_WAIT_S
@@ -1772,15 +1916,27 @@ def read(web: WebClient, args: list[str], channel: str, thread: str | None) -> N
 def gate() -> None:
     """PreToolUse hook: a risky shell command waits for an owner's Approve click."""
     event = json.loads(sys.stdin.read() or "{}")
-    command = (event.get("tool_input") or {}).get("command", "")
+    tool_input = event.get("tool_input") or {}
+    command = tool_input.get("command", "")
     conv = os.environ.get("SLACK_AGENT_CONV")
-    if not conv or not RISKY.search(command):
+    if not conv or not command:
         return
-    # The session may have moved from its thread to a code channel since it started.
-    conv = read_json(conv_state(conv), {}).get("moved_to") or conv
     if re.match(r"\s*(\S+/)?slack-agent\s+approve\b[^;|&]*&&", command):
         return  # the approve call in front of `&&` asks already
-    if not approve(WebClient(token=secret("bot")), conv, f"run `{command[:500]}`"):
+    first = read_json(conv_state(conv), {})
+    # The session may have moved from its thread to a code channel since it started.
+    conv = first.get("moved_to") or conv
+    state = read_json(conv_state(conv), {}) if first.get("moved_to") else first
+    steps = risky(command, event.get("cwd") or os.getcwd(), first.get("workspace") or state.get("workspace"))
+    if not steps:
+        return
+    kinds = sorted({k for k, _ in steps})
+    if set(kinds) <= set(state.get("approved_kinds") or []):
+        log("gate: approved for this task already", conv, kinds)
+        return
+    what = "; ".join(f"{k}: {d}" if d else k for k, d in steps)
+    if not approve(WebClient(token=secret("bot")), conv, what, why=tool_input.get("description"),
+                   command=command, kinds=kinds):
         print(f"{OWNER} did not approve this command in Slack. Do not run it; ask them in the conversation.",
               file=sys.stderr)
         sys.exit(2)
