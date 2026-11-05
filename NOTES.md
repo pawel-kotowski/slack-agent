@@ -108,6 +108,11 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   It now starts a task from the thread's first message.
 - A message posted from an app ends with `*Sent using* <app>`; the bot drops that footer. Match
   commands by prefix.
+- A reply in a closed session thread was dropped without a log line (2026-11-05). The listener
+  closed an idle DM session thread after a day; the owner's "revive it" there and a bare mention
+  after it found no session and hit `return  # a reply in a DM thread whose session is gone`. Now an
+  owner's reply in such a thread starts a new session there (`revive`, logged), told to read the
+  thread first, and the idle close waits two weeks (`IDLE_THREAD_S`).
 - After the laptop sleeps, the SDK's own reconnect can stall for good: the process lives, holds no
   socket and logs nothing (2026-10-30). The listener checks `client.is_connected()` every 30 s and
   restarts itself after 90 s down (`socket down` in the log). Slack then sends the missed events

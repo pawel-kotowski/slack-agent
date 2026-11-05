@@ -159,7 +159,8 @@ ENV = f"SLACK_AGENT_CONFIG={shlex.quote(str(CONFIG_PATH))}"
 # A session in `processing` falls back to `active` after one hour; renew it before that.
 KEEPALIVE_S = 50 * 60
 # A session thread nobody wrote in for this long is closed and its workspace removed.
-IDLE_THREAD_S = 24 * 3600
+# An owner's later reply in it starts a new session there (`revive`).
+IDLE_THREAD_S = 14 * 24 * 3600
 # Slack finalizes a stream 10 minutes after it starts.
 STREAM_S = 9 * 60
 APPROVAL_WAIT_S = 30 * 60
@@ -1161,7 +1162,11 @@ class Listener:
                 self.start(channel, user, text, link.get("channel_id") or channel, link.get("ts") or ts)
             return
         if is_dm and event.get("thread_ts"):
-            return  # a reply in a DM thread whose session is gone
+            # A reply in a DM thread whose session is gone (closed when idle, or finished):
+            # an owner's reply starts a new one there.
+            if self.owner(user):
+                self.revive(f"{channel}-{event['thread_ts']}", user, text, channel, ts)
+            return
         if kind == "app_mention" or is_dm:
             if not self.owner(user):
                 self.web.chat_postEphemeral(channel=channel, user=user, thread_ts=event.get("thread_ts"),
@@ -1169,6 +1174,15 @@ class Listener:
                 return
             root = event.get("thread_ts") or ts
             self.start(f"{channel}-{root}", user, text, channel, ts)
+
+    def revive(self, conv: str, user: str, text: str, origin: str, ts: str) -> None:
+        """Start a new session in a thread whose earlier session ended; it reads the thread first."""
+        channel, thread = split(conv)
+        how = "the Slack connector (slack_read_thread)" if CONNECTOR else f"`slack-agent read {channel} {thread}`"
+        log("revive", conv, self.display(user))
+        self.start(conv, user, text + f"\n\n(This thread had an earlier session of yours that ended; the thread "
+                                      f"is the conversation so far. Read all of it with {how} before you answer.)",
+                   origin, ts)
 
     def bare_mention(self, channel: str, thread: str | None, user: str) -> str:
         """The task of a mention without words: the message that starts its thread."""
@@ -1632,7 +1646,7 @@ class Listener:
                         elif state.get("status") == "processing" and time.time() - state.get("status_at", 0) > KEEPALIVE_S:
                             set_status(self.web, conv, "processing")
                         elif "-" in conv and time.time() - max(s.get("last", 0), state.get("status_at", 0)) > IDLE_THREAD_S:
-                            self.close(conv, "Closing this thread after a day without messages.")
+                            self.close(conv, "Closing this thread after two weeks without messages. Write in it to start again.")
                     except SlackApiError as exc:
                         log("housekeeping failed", conv, exc.response.get("error"))
 
