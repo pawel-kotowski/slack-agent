@@ -284,7 +284,8 @@ def update_state(conv: str, **values) -> dict:
 # split into simple commands (heredoc bodies dropped, quotes kept as one word), so text that only
 # mentions a command, in a heredoc or a commit message, is not run and does not count. Pushing any
 # branch but main or the default branch (also with --force-with-lease), opening a pull request, deleting local branches
-# and removing files inside the task's workspace or the temp directory need no approval.
+# and removing files inside the task's workspace or the temp directory need no approval. Neither does
+# pushing to main in this script's own repo: its AGENTS.md says to commit to main and push without asking.
 MAIN_BRANCHES = {"main", "master"}
 SHELLS = {"bash", "sh", "zsh", "dash"}
 PREFIXES = {"sudo", "command", "time", "nohup", "exec", "env", "builtin", "xargs"}
@@ -359,6 +360,7 @@ def risky(command: str, cwd: str, workspace: str | None) -> list[tuple[str, str]
             flags = [a for a in rest if a.startswith("-")]
             short = "".join(a[1:] for a in flags if not a.startswith("--"))
             if sub == "push":
+                own = os.path.realpath(cwd) == str(SELF.parent) or _inside(cwd, [str(SELF.parent)])
                 refs = [a for a in rest if not a.startswith("-")][1:]
                 if "--force" in flags or "f" in short or any(r.startswith("+") for r in refs):
                     found.append(("force push", " ".join(refs)))
@@ -367,7 +369,7 @@ def risky(command: str, cwd: str, workspace: str | None) -> list[tuple[str, str]
                     found.append(("delete a remote branch", " ".join(refs)))
                 for ref in refs:
                     dest = ref.lstrip("+").rpartition(":")[2].removeprefix("refs/heads/")
-                    if dest in MAIN_BRANCHES | {base_branch()}:
+                    if dest in MAIN_BRANCHES | {base_branch()} and not own:
                         found.append((f"push to {dest}", ref))
             elif sub == "reset" and "--hard" in flags:
                 found.append(("git reset --hard", "drops uncommitted work"))
@@ -973,7 +975,8 @@ How to work:
   leave a request undone that someone may expect you to do, say so in the channel.
   People may ask you things and you act on their requests. You may push branches other than main and {base}
   (also with `--force-with-lease`) and open pull requests without asking, delete local branches,
-  and delete files inside your workspace or the temp directory. Other risky steps need {owner}'s
+  and delete files inside your workspace or the temp directory. In {self_repo} (this bot's own
+  code) you also push to main without asking. Other risky steps need {owner}'s
   approval. Risky shell commands (a plain force push, pushing to main or {base}, deleting a remote branch,
   merging or closing a pull request (gh or gh api), gh release, deleting files elsewhere, git
   reset --hard, git clean -f, ...) stop at Approve/Deny buttons on their own: just run the
@@ -1026,7 +1029,7 @@ READ_LINE = """- You have no Slack connector. Read Slack with `slack-agent read 
 
 def system_prompt(**fields: str) -> str:
     notes = CONFIG["project_notes"].strip()
-    return SYSTEM.format(**fields, base=base_branch(), bot=CONFIG["bot_name"], owner=OWNER, self=SELF,
+    return SYSTEM.format(**fields, base=base_branch(), bot=CONFIG["bot_name"], owner=OWNER, self=SELF, self_repo=SELF.parent,
                          connector_note=(" (the Slack connector posts as {owner}, so never use it to post)".format(owner=OWNER)
                                          if CONNECTOR else ""),
                          read_line="" if CONNECTOR else READ_LINE,

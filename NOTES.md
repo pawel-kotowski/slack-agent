@@ -36,6 +36,11 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   the agent's Bash description as the reason, offers "Approve all like this in this task"
   (`approved_kinds` in the conversation's state), and gates PR merges and closes and DELETE calls
   through `gh api` too.
+- **Pushing the bot's own code to main needs no click** (2026-11-05). The gate asked the owner to
+  approve `git push origin main` in the `slack-agent` checkout, while this repo's `AGENTS.md` tells
+  agents to commit to main and push without asking; the owner said that approval should not be
+  needed. The gate now skips "push to main" when the push runs inside the checkout it runs from
+  (`SELF.parent`); a force push or a deleted branch there still asks.
 - **The rules live in the system prompt** (`--append-system-prompt-file`), so they survive
   compaction; the task is the first message.
 - **The Slack connector is a per-bot choice** (2026-11-04, `slack_connector`). It acts as the

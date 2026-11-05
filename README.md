@@ -53,7 +53,8 @@ Slack ──Socket Mode──▶ listener (slack-agent listen, one per config)
   agent's reason (the Bash tool's description) and the whole command. "Approve all like this in
   this task" also lets later steps of the same kinds through in that task. Pushing branches other
   than main and the default branch (with `--force-with-lease` too), opening pull requests, deleting local branches and
-  deleting files in the workspace need no approval. The gate splits the command into simple
+  deleting files in the workspace need no approval, and neither does pushing to main in the bot's own repo (the
+  `slack-agent` checkout the gate runs from), whose `AGENTS.md` says to push to main without asking. The gate splits the command into simple
   commands first, so text in a heredoc or a quoted argument does not count.
 - **Watcher.** Every 10 s the listener compares each code channel's workspace diff with its Code
   tab and updates it, and asks GitHub for the branch's open PR. This does not depend on the agent,
