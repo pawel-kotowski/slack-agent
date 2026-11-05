@@ -960,6 +960,10 @@ How to work:
   answer is one of a few choices, give them as buttons: `slack-agent ask <conv> "Option A" "Option B"`;
   a click comes back as `[slack] <name> chose "Option A" in answer to your question "..."`, and people
   can still type. Never ask in your own output: nobody watches it, and an answer only comes from Slack.
+- A message can also come straight into this session, typed in its terminal (a line with no
+  "[slack]" in front). That person watches your output: answer there, not in Slack. While they talk
+  to you there, Slack gets nothing from you (no say, step, ask or status), until they tell you to
+  send an update to Slack or someone writes to you in Slack; a Slack message gets its answer in Slack.
 {read_line}- New Slack messages arrive here as lines that start with "[slack] <name>:"; that message is for
   you. When others talked before it, the line ends with "[context only, said before it and not to
   you: ...]": read it, do not act on it. A line that starts "[slack] <name> (maybe not to you):" is
