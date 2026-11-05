@@ -41,6 +41,13 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   agents to commit to main and push without asking; the owner said that approval should not be
   needed. The gate now skips "push to main" when the push runs inside the checkout it runs from
   (`SELF.parent`); a force push or a deleted branch there still asks.
+- **A variable the command sets itself counts** (2026-11-05). Agents name their scratchpad once
+  (`SP=/tmp/claude-1001/.../scratchpad; ... rm -f $SP/work-*.png`), and the gate asked the owner to
+  approve deleting their own temp files: it expanded only the listener's environment, so `$SP`
+  stayed unknown and counted as outside the workspace. The gate now follows lines of plain
+  assignments (`NAME=value`, `export NAME=value`) through the command, into `bash -c`/`eval`, and
+  expands `$NAME`/`${NAME}` in `rm` and `cd` paths; an assignment before a command (`D=x cmd`) does
+  not set it, and a variable it cannot resolve still asks.
 - **The rules live in the system prompt** (`--append-system-prompt-file`), so they survive
   compaction; the task is the first message.
 - **The Slack connector is a per-bot choice** (2026-11-04, `slack_connector`). It acts as the
