@@ -150,6 +150,8 @@ COMMANDS = [
 COMMANDS = [c for c in COMMANDS if CONFIG["preview"] or not c["name"].startswith("preview")]
 STATE_DIR = Path(CONFIG.get("state_dir") or HOME / ".local/state/slack-agent" / CONFIG_PATH.stem)
 SESSIONS = STATE_DIR / "sessions.json"
+# Closed session threads and their Claude Code transcripts, so an owner's later reply resumes the session.
+CLOSED = STATE_DIR / "closed.json"
 APPROVALS = STATE_DIR / "approvals"
 LOG = STATE_DIR / "listener.log"
 AGENT = CONFIG["agent_command"]
@@ -335,23 +337,42 @@ def _inside(path: str, roots: list[str]) -> bool:
     return any(real != root and real.startswith(root.rstrip("/") + "/") for root in roots)
 
 
-def risky(command: str, cwd: str, workspace: str | None) -> list[tuple[str, str]]:
+def _expand(word: str, shell_vars: dict[str, str]) -> str:
+    """`word` with ~ and the $NAME / ${NAME} the command set itself or the environment holds;
+    an unknown variable stays as it is."""
+    def value(m: re.Match) -> str:
+        name = m.group(1) or m.group(2)
+        return shell_vars.get(name, os.environ.get(name, m.group(0)))
+    return re.sub(r"\$\{(\w+)\}|\$(\w+)", value, os.path.expanduser(word))
+
+
+def risky(command: str, cwd: str, workspace: str | None,
+          shell_vars: dict[str, str] | None = None) -> list[tuple[str, str]]:
     """The steps in `command` that need an owner's approval, as (kind, detail); empty: none."""
     roots = [os.path.realpath(p) for p in
              filter(None, [workspace, "/tmp", "/private/tmp", "/var/tmp", os.environ.get("TMPDIR")])]
+    shell_vars = dict(shell_vars or {})
     found: list[tuple[str, str]] = []
     for words in _simple_commands(command):
+        # `SP=/tmp/x; rm -rf $SP/y`: a line of only assignments (or `export NAME=...`) sets shell
+        # variables that later commands expand; an assignment before a command does not.
+        assigns = words[1:] if words[:1] == ["export"] else words
+        if assigns and all(re.fullmatch(r"\w+=.*", w) for w in assigns):
+            for w in assigns:
+                name, _, val = w.partition("=")
+                shell_vars[name] = _expand(val, shell_vars)
+            continue
         while words and (re.fullmatch(r"\w+=.*", words[0]) or words[0] in PREFIXES):
             words = words[1:]
         if not words:
             continue
         prog, args = os.path.basename(words[0]), words[1:]
         if prog in SHELLS and "-c" in args[:-1]:
-            found += risky(args[args.index("-c") + 1], cwd, workspace)
+            found += risky(args[args.index("-c") + 1], cwd, workspace, shell_vars)
         elif prog == "eval":
-            found += risky(" ".join(args), cwd, workspace)
+            found += risky(" ".join(args), cwd, workspace, shell_vars)
         elif prog == "cd" and args:
-            cwd = os.path.join(cwd, os.path.expanduser(args[0]))
+            cwd = os.path.join(cwd, _expand(args[0], shell_vars))
         elif prog == "git":
             while args and args[0].startswith("-"):  # git's own options: -C <dir>, -c <k=v>, ...
                 if args[0] == "-C" and len(args) > 1:
@@ -403,7 +424,7 @@ def risky(command: str, cwd: str, workspace: str | None) -> list[tuple[str, str]
             paths = args[args.index("--") + 1:] if "--" in args else [a for a in args if not a.startswith("-")]
             outside = []
             for p in paths:
-                p = os.path.expandvars(os.path.expanduser(p))
+                p = _expand(p, shell_vars)
                 stem = re.split(r"[*?\[{]", p)[0]  # a glob: judge the directory it starts in
                 if "$" in stem or not _inside(os.path.join(cwd, stem or "."), roots):
                     outside.append(p)
@@ -695,6 +716,18 @@ setInterval(tick,1000);setInterval(poll,3000);tick();chart(__TURNS__);poll();
 
 def profile_projects() -> Path:
     return Path(CONFIG["claude_projects"])
+
+
+def project_folder(workspace: str) -> Path:
+    """Where Claude Code keeps the transcripts of sessions started in a workspace."""
+    return profile_projects() / re.sub(r"[^A-Za-z0-9]", "-", workspace)
+
+
+def transcript(workspace: str) -> Path | None:
+    """The newest Claude Code transcript of a workspace."""
+    folder = project_folder(workspace)
+    files = sorted(folder.glob("*.jsonl"), key=lambda f: f.stat().st_mtime) if folder.exists() else []
+    return files[-1] if files else None
 
 
 def ui_status(channel: str) -> dict:
@@ -1176,10 +1209,21 @@ class Listener:
             self.start(f"{channel}-{root}", user, text, channel, ts)
 
     def revive(self, conv: str, user: str, text: str, origin: str, ts: str) -> None:
-        """Start a new session in a thread whose earlier session ended; it reads the thread first."""
+        """A reply in a thread whose session ended: resume that Claude session, else start one that reads the thread."""
         channel, thread = split(conv)
+        closed = read_json(CLOSED, {}).get(conv) or {}
+        if closed.get("transcript") and Path(closed["transcript"]).exists():
+            log("revive", conv, self.display(user), "resuming", Path(closed["transcript"]).stem)
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(closed.get("closed", 0)))
+            kept = closed.get("workspace") and Path(closed["workspace"]).is_dir()
+            where = ("in the same workspace, which was kept because it had work that was not pushed" if kept else
+                     "in a new workspace on a fresh branch from the default branch (the old one was removed; "
+                     "it had nothing unpushed)")
+            return self.start(conv, user, text + f"\n\n(The listener closed this thread on {when} after it sat "
+                                                 f"idle. This is your session of it, resumed {where}.)",
+                              origin, ts, resume=closed)
         how = "the Slack connector (slack_read_thread)" if CONNECTOR else f"`slack-agent read {channel} {thread}`"
-        log("revive", conv, self.display(user))
+        log("revive", conv, self.display(user), "new session")
         self.start(conv, user, text + f"\n\n(This thread had an earlier session of yours that ended; the thread "
                                       f"is the conversation so far. Read all of it with {how} before you answer.)",
                    origin, ts)
@@ -1323,7 +1367,7 @@ class Listener:
 
     # --- sessions -------------------------------------------------------------------------
 
-    def start(self, conv: str, user: str, text: str, origin: str, ts: str) -> None:
+    def start(self, conv: str, user: str, text: str, origin: str, ts: str, resume: dict | None = None) -> None:
         if not text:
             return
         channel, thread = split(conv)
@@ -1339,7 +1383,10 @@ class Listener:
         self.sessions[conv] = {"conv": conv, "name": name, "origin": origin, "ts": ts,
                                "started": time.time(), "starting": True, "initiator": user}
         set_status(self.web, conv, "processing", title=text.splitlines()[0][:80])
-        workspace, branch = self.workspace(conv, name)
+        if resume and resume.get("workspace") and Path(resume["workspace"]).is_dir():
+            workspace, branch = resume["workspace"], resume.get("branch")
+        else:
+            workspace, branch = self.workspace(conv, name)
         if not workspace:
             del self.sessions[conv]
             set_status(self.web, conv, "active")
@@ -1355,8 +1402,17 @@ class Listener:
                                workspace=workspace, branch=branch)
         task = TASK.format(who=self.display(user), text=text, origin_link=link,
                            read=TASK_READ.format(origin=origin, ts=ts))
+        session_id = None
+        if resume:  # Claude Code resumes a session from its workspace's project folder: copy it there
+            old, dest = Path(resume["transcript"]), project_folder(workspace)
+            if old.parent != dest:
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(old, dest / old.name)
+                if (old.parent / old.stem).is_dir():  # its subagents' and tool results' files
+                    shutil.copytree(old.parent / old.stem, dest / old.stem, dirs_exist_ok=True)
+            session_id = old.stem
         self.sessions[conv]["seen"] = ts
-        self.sessions[conv][HANDLE] = self.launch(conv, system, task)
+        self.sessions[conv][HANDLE] = self.launch(conv, system, task, resume=session_id)
         del self.sessions[conv]["starting"]
         self.save()
         log("started", conv, name, self.sessions[conv][HANDLE])
@@ -1388,7 +1444,7 @@ class Listener:
         close_seeded_terminals(wt["path"])
         return wt["path"], wt.get("branch", "").removeprefix("refs/heads/")
 
-    def launch(self, conv: str, system: str, task: str) -> str | None:
+    def launch(self, conv: str, system: str, task: str, resume: str | None = None) -> str | None:
         s = self.sessions[conv]
         if T3:
             return self.launch_t3(conv, system, task)
@@ -1402,7 +1458,9 @@ class Listener:
         args = " ".join(CONFIG["claude_args"])
         agent = " ".join(shlex.quote(a) for a in AGENT)
         command = (f'SLACK_AGENT_CONV={conv} {ENV} {agent} {args} --settings {shlex.quote(str(settings))} '
-                   f'--append-system-prompt-file {shlex.quote(str(system_file))} "$(cat {shlex.quote(str(prompt_file))})"')
+                   f'--append-system-prompt-file {shlex.quote(str(system_file))} '
+                   + (f'--resume {shlex.quote(resume)} ' if resume else '')
+                   + f'"$(cat {shlex.quote(str(prompt_file))})"')
         res = orca("terminal", "create", "--worktree", f'path:{s["workspace"]}',
                    "--title", f"slack {s['name']}", "--command", command)
         handle = (res.get("result") or {}).get("terminal", {}).get("handle")
@@ -1594,6 +1652,12 @@ class Listener:
         if not s:
             return
         self.save()
+        ws = s.get("workspace")
+        old = transcript(ws) if ws and "-" in conv and not T3 else None
+        if old:  # an owner's later reply in the thread resumes this session (`revive`)
+            closed = read_json(CLOSED, {})
+            closed[conv] = {"transcript": str(old), "workspace": ws, "branch": s.get("branch"), "closed": time.time()}
+            write_json(CLOSED, closed)
         had_preview = bool(read_json(conv_state(conv), {}).get("preview"))
         preview_stop(conv)
         if had_preview:

@@ -113,6 +113,12 @@ Built 2026-10-29 and run first for one repo in one company workspace.
   after it found no session and hit `return  # a reply in a DM thread whose session is gone`. Now an
   owner's reply in such a thread starts a new session there (`revive`, logged), told to read the
   thread first, and the idle close waits two weeks (`IDLE_THREAD_S`).
+- A revive must resume the same Claude session, not start a blank one that reads the thread (the
+  owner, the same day: "this revived claude session is not the one that was closed"). Closing a
+  session thread records its newest transcript in `closed.json`; a revive copies that transcript
+  into the new workspace's project folder (Claude Code resumes only from the folder of the
+  current directory) and launches `claude --resume <id>` with the new message. A workspace kept
+  for unpushed work is reused. On the T3 backend a revive still starts a new thread.
 - After the laptop sleeps, the SDK's own reconnect can stall for good: the process lives, holds no
   socket and logs nothing (2026-10-30). The listener checks `client.is_connected()` every 30 s and
   restarts itself after 90 s down (`socket down` in the log). Slack then sends the missed events
